@@ -1,0 +1,62 @@
+# Objectif Français — Project Rules
+
+## What this is
+French vocabulary learning web app. Replaces WordBit. Built on Lexique 3.83 (46,792 words, CC-BY-SA).
+
+## Stack
+React + Vite, Supabase (future), Vercel deployment
+
+## Dictionary
+- Source: /data/lexique383_full.json
+- 46,792 unique lemmas, frequency-ranked from spoken French subtitle corpus
+- Fields: w (word), l (lemma), p (phonetic), g (grammar), gn (gender), lv (CEFR), fs (spoken freq), fw (written freq), sy (syllables), mr (morph root), fm (family members)
+- CEFR levels assigned by frequency rank: top 500=A1, next 1000=A2, next 2000=B1, next 3500=B2, next 8000=C1, rest=C2
+- No English translations yet — need to add
+
+## Core features (implemented in V3)
+- Email/password auth with persistent sessions
+- Rapid Review: scroll through words one-by-one, tap know/don't know (WordBit removed this feature — we restore it)
+- Quiz mode: identify words by phonetics and grammar
+- Family Quiz: test word family connections
+- Chain learning: knowing a root gives 70% credit to derived words, knowing a family member in "learning" state gives 30%
+- Spaced repetition: 3-pass system, expanding intervals (1→2→4→8→16→30 days)
+- Bulk import: mark words as known in batches (for transitioning from WordBit)
+- Search + filter by CEFR level and grammar category
+- Roots & Patterns screen teaching suffix/prefix rules
+
+## Exam targeting
+- All paths use TCF Canada (NCLC scoring)
+- Francophone Mobility: NCLC 5+ speaking & listening
+- PR/Express Entry: NCLC 7+ all four skills
+- Citizenship: NCLC 4+ speaking & listening
+- Personal: no exam, learn at own pace
+
+## Regions
+- FR (France), CA (Canada — not just Quebec, includes NB, Nova Scotia, etc.), BE (Belgique), AF (Afrique francophone)
+- Canada is the default region
+
+## Key design decisions
+- Zero ads, ever
+- Anonymous-first: study without login, login to save progress
+- Frequency over CEFR: show real spoken frequency, not arbitrary textbook levels
+- Dual system: general frequency rank + domain priority (immigration words surface first if goal is Francophone Mobility)
+- Word families are navigable: tap a family member to jump to it
+- Gender shown with color coding (blue=masc, pink=fem)
+
+## What to build next (priority order)
+1. Load full 46,792-word dictionary from JSON instead of hardcoded 80-word array
+2. English translations for at least top 3,000 words
+3. Deploy to Vercel
+4. Audio/TTS pronunciation with adjustable speed
+5. Supabase auth + progress sync
+6. False friends database (vrais amis, faux amis, semi-faux amis, faux-faux amis)
+7. Domain vocabulary modules (tech/phone, workplace, immigration, housing, healthcare)
+8. Exam mode with TCF Canada parameters
+9. Timed rapid review for listening speed training
+
+## Never do
+- Add ads or ad SDKs
+- Remove the rapid review feature
+- Require login to study
+- Duplicate words across CEFR levels
+- Use textbook ordering instead of frequency ranking
