@@ -1,6 +1,4 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
-import { RELATIONS, getRelations, hasRelations } from "./data/relations.js";
-import { conceptFor } from "./data/concepts.js";
 
 /*
   FRENCH LEARNING APP — V3
@@ -161,15 +159,6 @@ export default function App(){
   }, [L]);
 
   const findWord = useCallback((form) => wordIndex.get(form.toLowerCase()), [wordIndex]);
-
-  // Quality-filtered pool for quizzes: common words only, no garbage
-  const quizPool = useMemo(() => L.filter(w =>
-    ["A1","A2","B1","B2"].includes(w.lv) &&
-    w.fs >= 20 &&
-    w.w.length >= 2 &&
-    !w.w.includes(" ") &&
-    (tr(w) || hasRelations(w.lm))
-  ), [L]);
 
   // Load dictionary + session on mount
   useEffect(()=>{
@@ -334,61 +323,23 @@ export default function App(){
   const statusLabel = (s)=> s==="known"?"✓ Known":s==="familiar"?"≈ Familiar":s==="learning"?"◐ Learning":"○ New";
 
   const startQuiz=(mode="word")=>{
-    const pool = quizPool.filter(w=>st(w.id)!=="known");
-    if(pool.length<4) return;
-
     if(mode==="family"){
-      const famPool = pool.filter(w=>w.fm.length>=2);
-      if(famPool.length<1) return;
-      const tgt=famPool[Math.floor(Math.random()*famPool.length)];
+      const pool=L.filter(w=>w.fm.length>=2);const tgt=pool[Math.floor(Math.random()*pool.length)];
       const ans=tgt.fm[Math.floor(Math.random()*Math.min(tgt.fm.length,3))];
-      const fakes=quizPool.filter(w=>w.id!==tgt.id&&w.lm!==tgt.lm)
-        .sort(()=>Math.random()-.5).slice(0,2).map(w=>w.fm[0]||w.w);
+      const fakes=L.filter(w=>w.id!==tgt.id).sort(()=>Math.random()-.5).slice(0,2).map(w=>w.fm[0]||w.w);
       setQuiz({tgt,opts:[...fakes,ans].sort(()=>Math.random()-.5),ans,mode:"family",a:null,ok:null});
+    } else {
+      const pool=vocab.filter(w=>st(w.id)!=="known");if(pool.length<2)return;
+      const tgt=pool[Math.floor(Math.random()*Math.min(pool.length,10))];
+      // Show family members + similar words as options (not random garbage)
+      const familyOpts = (tgt.fm||[]).map(f => findWord(f)).filter(Boolean).filter(w => w.id !== tgt.id).slice(0,3).map(w => w.w);
+      // Fill remaining slots with same-grammar words
+      const used = new Set([tgt.w, ...familyOpts]);
+      const fillers = L.filter(w => !used.has(w.w) && w.g === tgt.g).sort(() => Math.random() - 0.5);
+      while (familyOpts.length < 3 && fillers.length > 0) { familyOpts.push(fillers.pop().w); }
+      if(familyOpts.length<2)return;
+      setQuiz({tgt,opts:[...familyOpts.slice(0,3),tgt.w].sort(()=>Math.random()-.5),ans:tgt.w,mode:"word",a:null,ok:null});
     }
-    else if(mode==="audio"){
-      const tgt=pool[Math.floor(Math.random()*pool.length)];
-      const distractors=quizPool
-        .filter(w=>w.id!==tgt.id&&w.g===tgt.g&&Math.abs(w.w.length-tgt.w.length)<=2)
-        .sort(()=>Math.random()-.5).slice(0,3).map(w=>w.w);
-      if(distractors.length<2) return;
-      setQuiz({tgt,opts:[...distractors,tgt.w].sort(()=>Math.random()-.5),ans:tgt.w,mode:"audio",a:null,ok:null});
-      setTimeout(()=>speakFrench(tgt.w,audioRate),400);
-    }
-    else if(mode==="meaning"){
-      const trPool = pool.filter(w=>tr(w));
-      if(trPool.length<4) return;
-      const tgt=trPool[Math.floor(Math.random()*trPool.length)];
-      const distractors=trPool.filter(w=>w.id!==tgt.id&&tr(w)!==tr(tgt))
-        .sort(()=>Math.random()-.5).slice(0,3).map(w=>tr(w));
-      setQuiz({tgt,opts:[...distractors,tr(tgt)].sort(()=>Math.random()-.5),ans:tr(tgt),mode:"meaning",a:null,ok:null});
-    }
-    else {
-      // RELATION QUIZ: pick the related word (synonym or opposite)
-      const relPool = pool.filter(w=>hasRelations(w.lm));
-      if(relPool.length<1){ startQuizMeaningFallback(); return; }
-      const tgt=relPool[Math.floor(Math.random()*relPool.length)];
-      const rels=getRelations(tgt.lm);
-      const allRel=[...rels.syn,...rels.ant];
-      if(allRel.length===0){ startQuizMeaningFallback(); return; }
-      const ans=allRel[Math.floor(Math.random()*allRel.length)];
-      const isAnt=rels.ant.includes(ans);
-      const distractors=quizPool
-        .filter(w=>w.id!==tgt.id&&w.lm!==tgt.lm&&!allRel.includes(w.w)&&!allRel.includes(w.lm))
-        .sort(()=>Math.random()-.5).slice(0,3).map(w=>w.w);
-      setQuiz({tgt,opts:[...distractors,ans].sort(()=>Math.random()-.5),ans,
-        mode:"relation",relType:isAnt?"opposite":"similar",a:null,ok:null});
-    }
-    setScr("quiz");
-  };
-
-  const startQuizMeaningFallback = () => {
-    const pool = quizPool.filter(w=>st(w.id)!=="known"&&tr(w));
-    if(pool.length<4) return;
-    const tgt=pool[Math.floor(Math.random()*pool.length)];
-    const distractors=pool.filter(w=>w.id!==tgt.id&&tr(w)!==tr(tgt))
-      .sort(()=>Math.random()-.5).slice(0,3).map(w=>tr(w));
-    setQuiz({tgt,opts:[...distractors,tr(tgt)].sort(()=>Math.random()-.5),ans:tr(tgt),mode:"meaning",a:null,ok:null});
     setScr("quiz");
   };
 
@@ -609,7 +560,6 @@ export default function App(){
         <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,maxWidth:400,margin:"0 auto",width:"100%"}}>
           {wSt!=="new"&&<div style={{fontSize:10,color:statusColor(wSt),background:wSt==="known"?"rgba(52,191,130,0.08)":wSt==="familiar"?"rgba(224,147,72,0.08)":"rgba(75,133,224,0.08)",padding:"3px 10px",borderRadius:10,marginBottom:8}}>{statusLabel(wSt)}</div>}
           
-          {conceptFor(w)&&<div style={{fontSize:56,marginBottom:4}}>{conceptFor(w)}</div>}
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
             <h1 style={{fontSize:42,fontWeight:700,margin:0,letterSpacing:"-0.5px"}}>{w.w}</h1>
             <AudioBtn text={w.w} rate={audioRate} />
@@ -727,7 +677,6 @@ export default function App(){
         </div>
         <div style={{padding:16,maxWidth:440,margin:"0 auto"}}>
           <div style={{marginBottom:16}}>
-            {conceptFor(cur)&&<div style={{fontSize:44,marginBottom:4}}>{conceptFor(cur)}</div>}
             <div style={{display:"flex",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
               <h2 style={{fontSize:28,fontWeight:700,margin:0}}>{cur.w}</h2>
               <span style={{fontSize:12,color:"var(--t3)"}}>/{cur.p}/</span>
@@ -782,17 +731,8 @@ export default function App(){
         <span style={{fontSize:13,fontWeight:600}}>{quiz.mode==="family"?"Family Quiz":"Quiz"}</span>
       </div>
       <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20,maxWidth:400,margin:"0 auto",width:"100%"}}>
-        <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",marginBottom:12}}>
-          {quiz.mode==="family"?"Which belongs to the family of:"
-           :quiz.mode==="audio"?"What did you hear? 🔊"
-           :quiz.mode==="meaning"?"What does this mean?"
-           :quiz.mode==="relation"?(quiz.relType==="opposite"?"Pick the OPPOSITE of:":"Pick a word SIMILAR to:")
-           :"Identify"}
-        </div>
-        <h2 style={{fontSize:32,fontWeight:700,margin:"0 0 4px"}}>
-          {quiz.mode==="audio"&&!quiz.a?"🔊 ???":quiz.tgt.w}
-        </h2>
-        {quiz.mode==="audio"&&!quiz.a&&<AudioBtn text={quiz.tgt.w} rate={audioRate} label="🔊 Replay" s={{marginBottom:8}}/>}
+        <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",marginBottom:12}}>{quiz.mode==="family"?"Which belongs to:":"Identify"}</div>
+        <h2 style={{fontSize:32,fontWeight:700,margin:"0 0 4px"}}>{quiz.tgt.w}</h2>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:24}}>
           <p style={{fontSize:12,color:"var(--t3)",margin:0}}>/{quiz.tgt.p}/ · {quiz.tgt.lm}</p>
           <AudioBtn text={quiz.tgt.w} rate={audioRate} s={{padding:"4px 8px",fontSize:12}} />
@@ -806,16 +746,7 @@ export default function App(){
         </div>
         {quiz.a&&<div style={{marginTop:16,textAlign:"center"}}>
           <p style={{fontSize:15,fontWeight:600,color:quiz.ok?"var(--ac2)":"var(--dng)",marginBottom:12}}>{quiz.ok?"Correct!":"Not quite"}</p>
-          {quiz.mode==="relation"&&hasRelations(quiz.tgt.lm)&&(
-            <div style={{fontSize:11,color:"var(--t2)",marginBottom:10,maxWidth:300,margin:"0 auto 10px"}}>
-              {getRelations(quiz.tgt.lm).syn.length>0&&<div>Similar: {getRelations(quiz.tgt.lm).syn.join(", ")}</div>}
-              {getRelations(quiz.tgt.lm).ant.length>0&&<div>Opposite: {getRelations(quiz.tgt.lm).ant.join(", ")}</div>}
-            </div>
-          )}
-          {quiz.mode==="meaning"&&tr(quiz.tgt)&&(
-            <p style={{fontSize:12,color:"var(--t2)",marginBottom:10}}>{quiz.tgt.w} = {tr(quiz.tgt)}</p>
-          )}
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"center"}}><Btn onClick={()=>startQuiz(quiz.mode)}>Next →</Btn><Btn onClick={()=>startQuiz("relation")} s={{background:"var(--s2)",color:"var(--acw)"}}>↔ Relations</Btn><Btn onClick={()=>startQuiz("audio")} s={{background:"var(--s2)",color:"var(--ac)"}}>👂 Audio</Btn></div>
+          <div style={{display:"flex",gap:6}}><Btn onClick={()=>startQuiz("word")}>Next →</Btn><Btn onClick={()=>startQuiz("family")} s={{background:"var(--s2)",color:"var(--acw)"}}>🔗 Family →</Btn></div>
         </div>}
       </div>
     </div>
@@ -892,9 +823,7 @@ export default function App(){
 
         {/* Actions */}
         <div style={{display:"flex",gap:4,marginBottom:10,flexWrap:"wrap"}}>
-          <Btn onClick={()=>startQuiz("relation")} pri s={{flex:1,padding:"10px 0"}}>▶ Relations</Btn>
-          <Btn onClick={()=>startQuiz("meaning")} s={{flex:1,padding:"10px 0",background:"var(--s2)",color:"var(--ac2)"}}>🇬🇧 Meaning</Btn>
-          <Btn onClick={()=>startQuiz("audio")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--ac)"}}>👂</Btn>
+          <Btn onClick={()=>startQuiz("word")} pri s={{flex:1,padding:"10px 0"}}>▶ Quiz</Btn>
           <Btn onClick={()=>setScr("rapid-setup")} s={{flex:1,padding:"10px 0",background:"rgba(224,147,72,0.1)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>⚡ Rapid</Btn>
           <Btn onClick={()=>startQuiz("family")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--acw)"}}>🔗</Btn>
           <Btn onClick={()=>setScr("roots")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--acw)"}}>🌳</Btn>
