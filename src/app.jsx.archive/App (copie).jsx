@@ -68,17 +68,6 @@ const TR = {
 "expliquer":"to explain","jouer":"to play","monter":"to go up / climb"
 };
 const tr = (w) => TR[w.lm] || TR[w.w] || null;
-// Live translation fetch for words not in TR table (free MyMemory API)
-const TR_CACHE_KEY = "objectif-francais:tr-cache";
-const loadTrCache = () => { try { return JSON.parse(localStorage.getItem(TR_CACHE_KEY)||"{}"); } catch { return {}; } };
-const saveTrCache = (c) => { try { localStorage.setItem(TR_CACHE_KEY, JSON.stringify(c)); } catch {} };
-async function fetchTranslation(word) {
-  try {
-    const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(word)}&langpair=fr|en`);
-    const d = await r.json();
-    return d?.responseData?.translatedText || null;
-  } catch { return null; }
-}
 // ============ STORAGE (localStorage — persists across reloads & dev sessions) ============
 const STORAGE_PREFIX = "objectif-francais:";
 const DB = {
@@ -155,7 +144,6 @@ export default function App(){
   const [rapidLevel, setRapidLevel] = useState(null);
   const [rapidStats, setRapidStats] = useState({known:0,familiar:0,learning:0,total:0});
   const [shuffledPool, setShuffledPool] = useState([]);
-  const [liveTr, setLiveTr] = useState({});
   const [bulkSrch, setBulkSrch] = useState("");
   const [audioOn, setAudioOn] = useState(() => localStorage.getItem(STORAGE_PREFIX + "audio-on") !== "0");
   const [audioRate, setAudioRate] = useState(() => {
@@ -243,20 +231,6 @@ export default function App(){
     const w = pool2[rapidIdx];
     if (w) speakFrench(w.w, audioRate);
   }, [scr, rapidIdx, rapidLevel, audioOn, audioRate, L]);
-  // Fetch translation when viewing a word that has none locally
-  useEffect(() => {
-    if (scr !== "word" || !cur) return;
-    if (tr(cur)) return;
-    const cache = loadTrCache();
-    if (cache[cur.lm]) { setLiveTr(p=>({...p,[cur.lm]:cache[cur.lm]})); return; }
-    if (liveTr[cur.lm]) return;
-    fetchTranslation(cur.lm || cur.w).then(t => {
-      if (t) {
-        setLiveTr(p=>({...p,[cur.lm]:t}));
-        const c = loadTrCache(); c[cur.lm]=t; saveTrCache(c);
-      }
-    });
-  }, [scr, cur]);
 
   // ============ AUTH ============
   const handleAuth = async (mode) => {
@@ -759,9 +733,7 @@ export default function App(){
               <span style={{fontSize:12,color:"var(--t3)"}}>/{cur.p}/</span>
               <AudioBtn text={cur.w} rate={audioRate} s={{padding:"5px 8px",fontSize:13}} />
             </div>
-            {(()=>{const m=tr(cur)||liveTr[cur.lm];return m
-              ?<p style={{margin:"4px 0 0",fontSize:16,color:"var(--ac2)",fontWeight:500}}>{m}</p>
-              :<p style={{margin:"4px 0 0",fontSize:13,color:"var(--t3)",fontStyle:"italic"}}>translating…</p>;})()}
+            {tr(cur)&&<p style={{margin:"4px 0 0",fontSize:16,color:"var(--ac2)",fontWeight:500}}>{tr(cur)}</p>}
             <div style={{display:"flex",gap:4,marginTop:8,flexWrap:"wrap"}}>
               <Tag>{cur.lv}</Tag><Tag>{cur.g}</Tag>
               {cur.gn&&<Tag c={cur.gn==="m"?"rgba(79,138,232,0.12)":"rgba(232,79,155,0.12)"}>{cur.gn==="m"?"masc.":"fém."}</Tag>}
