@@ -1,4 +1,5 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { createClient } from "@supabase/supabase-js";
 import { RELATIONS, getRelations, hasRelations } from "./data/relations.js";
 import { conceptFor } from "./data/concepts.js";
 
@@ -104,6 +105,41 @@ const DB = {
   },
 };
 
+// ============ SUPABASE (accounts + cloud progress) ============
+// localStorage stays as the instant/offline cache; Supabase is the canonical copy.
+const SB_URL = import.meta.env.VITE_SUPABASE_URL;
+const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = SB_URL && SB_KEY ? createClient(SB_URL, SB_KEY) : null;
+
+// Per-word merge: the entry with the newer timestamp wins
+const mergeProgress = (a = {}, b = {}) => {
+  const out = { ...a };
+  for (const [id, e] of Object.entries(b || {})) {
+    if (!out[id] || (e?.t || 0) > (out[id].t || 0)) out[id] = e;
+  }
+  return out;
+};
+
+const toRow = (uid, id, e) => ({
+  user_id: uid, word_id: Number(id),
+  ps: e.ps || 0, fl: e.fl || 0, fam: e.fam || 0, iv: e.iv || 1, t: e.t || 0,
+});
+
+// Supabase returns max 1000 rows per request, so page through
+async function fetchCloudProgress(uid) {
+  const out = {};
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase.from("progress")
+      .select("word_id,ps,fl,fam,iv,t").eq("user_id", uid)
+      .order("word_id").range(from, from + PAGE - 1);
+    if (error) throw error;
+    data.forEach(r => { out[r.word_id] = { ps: r.ps, fl: r.fl, fam: r.fam, iv: r.iv, t: r.t }; });
+    if (data.length < PAGE) break;
+  }
+  return out;
+}
+
 // ============ AUDIO (French TTS via Web Speech API) ============
 const speakFrench = (text, rate = 0.92) => {
   if (!text || !window.speechSynthesis) return;
@@ -135,9 +171,18 @@ export default function App(){
 
   // Auth state
   const [user, setUser] = useState(null);
-  const [authScr, setAuthScr] = useState("login"); // login | signup | forgot
-  const [authForm, setAuthForm] = useState({email:"",password:"",error:null,loading:false});
+  const [authScr, setAuthScr] = useState("login"); // login | signup | link
+  const [authForm, setAuthForm] = useState({email:"",password:"",error:null,info:null,loading:false});
   const [authChecked, setAuthChecked] = useState(false);
+  const [sync, setSync] = useState("idle"); // idle | saving | saved | offline
+
+  // Sync bookkeeping (refs so timers/listeners always see current values)
+  const userRef = useRef(null);
+  const lrnRef = useRef({});
+  const syncedRef = useRef({});   // word_id -> t last confirmed in the cloud
+  const pushingRef = useRef(false);
+  const pendingRef = useRef(false);
+  const loadedUidRef = useRef(null);
 
   // App state
   const [scr, setScr] = useState("onb");
@@ -183,7 +228,7 @@ export default function App(){
     (tr(w) || hasRelations(w.lm))
   ), [L]);
 
-  // Load dictionary + session on mount
+  // Load dictionary on mount
   useEffect(()=>{
     let cancelled = false;
     (async()=>{
@@ -196,36 +241,111 @@ export default function App(){
         if (!cancelled) setDictLoading(false);
       }
     })();
-    (async()=>{
-      const session = await DB.get("user-session");
-      const lastEmail = localStorage.getItem(STORAGE_PREFIX + "last-email");
-      if (lastEmail) setAuthForm(f => ({ ...f, email: lastEmail }));
-      if (cancelled) return;
-      if(session){
-        setUser(session);
-        const progress = await DB.get(`progress-${session.email}`);
-        if(progress) setLrn(progress);
-        const profile = await DB.get(`profile-${session.email}`);
-        if(profile) setProf(profile);
-        setScr("home");
-      }
-      setAuthChecked(true);
-    })();
     return () => { cancelled = true; };
   },[]);
 
-  // Save progress whenever it changes
-  useEffect(()=>{
-    if(user && Object.keys(lrn).length > 0){
-      DB.set(`progress-${user.email}`, lrn);
-    }
-  },[lrn, user]);
+  useEffect(()=>{ userRef.current = user; },[user]);
+  useEffect(()=>{ lrnRef.current = lrn; },[lrn]);
 
-  // Save profile
+  // Load everything for a signed-in Supabase user: local cache + cloud + old pre-Supabase data
+  const loadUser = useCallback(async (sbUser) => {
+    const uid = sbUser.id;
+    const email = sbUser.email || null;
+    const local = (await DB.get(`progress-${uid}`)) || {};
+    // Carry over progress from the old localStorage-only accounts (keyed by email)
+    const legacy = email ? (await DB.get(`progress-${email}`)) || {} : {};
+    let cloud = {};
+    try { cloud = await fetchCloudProgress(uid); }
+    catch (e) { console.error("load progress:", e); setSync("offline"); }
+    syncedRef.current = Object.fromEntries(Object.entries(cloud).map(([id, e]) => [id, e.t || 0]));
+    // Anything local that's newer than the cloud gets pushed by the sync effect
+    setLrn(mergeProgress(mergeProgress(cloud, local), legacy));
+
+    let p = (await DB.get(`profile-${uid}`)) || (email ? await DB.get(`profile-${email}`) : null);
+    const { data: cp } = await supabase.from("profiles").select("goal,region").eq("id", uid).maybeSingle();
+    if (cp?.goal) p = { goal: cp.goal, region: cp.region || "CA" };
+    if (p?.goal) { setProf(p); setScr("home"); } else setScr("onb");
+
+    loadedUidRef.current = uid;
+    setUser({ id: uid, email, anon: !!sbUser.is_anonymous });
+  }, []);
+
+  // Restore session on load + react to sign-in / sign-out / account upgrade
   useEffect(()=>{
-    if(user && prof.goal){
-      DB.set(`profile-${user.email}`, prof);
+    const lastEmail = localStorage.getItem(STORAGE_PREFIX + "last-email");
+    if (lastEmail) setAuthForm(f => ({ ...f, email: lastEmail }));
+    if (!supabase) { setAuthChecked(true); return; }
+    let cancelled = false;
+    const apply = async (session) => {
+      if (cancelled) return;
+      const sbUser = session?.user;
+      if (!sbUser) {
+        loadedUidRef.current = null;
+        setUser(null);
+      } else if (loadedUidRef.current === sbUser.id) {
+        // Same user (token refresh, or guest just linked an account): update details only
+        setUser(u => ({ ...u, email: sbUser.email || null, anon: !!sbUser.is_anonymous }));
+      } else {
+        await loadUser(sbUser);
+      }
+      setAuthChecked(true);
+    };
+    supabase.auth.getSession().then(({ data }) => apply(data.session));
+    // Don't await Supabase calls inside this callback (can deadlock) — defer instead
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => { setTimeout(() => apply(session), 0); });
+    return () => { cancelled = true; sub.subscription.unsubscribe(); };
+  },[loadUser]);
+
+  // Push only words whose timestamp changed since the last confirmed sync
+  const pushProgress = useCallback(async () => {
+    const u = userRef.current;
+    if (!u || !supabase) return;
+    if (pushingRef.current) { pendingRef.current = true; return; }
+    const synced = syncedRef.current;
+    const rows = Object.entries(lrnRef.current)
+      .filter(([id, e]) => Number.isInteger(Number(id)) && synced[id] !== (e.t || 0))
+      .map(([id, e]) => toRow(u.id, id, e));
+    if (!rows.length) return;
+    pushingRef.current = true;
+    setSync("saving");
+    try {
+      for (let i = 0; i < rows.length; i += 500) {
+        const { error } = await supabase.from("progress").upsert(rows.slice(i, i + 500));
+        if (error) throw error;
+      }
+      rows.forEach(r => { synced[r.word_id] = r.t; });
+      setSync("saved");
+    } catch (e) {
+      console.error("sync:", e);
+      setSync("offline");
+    } finally {
+      pushingRef.current = false;
+      if (pendingRef.current) { pendingRef.current = false; pushProgress(); }
     }
+  }, []);
+
+  // Save progress: local cache immediately, cloud 3s after the last change
+  useEffect(()=>{
+    if(!user || Object.keys(lrn).length === 0) return;
+    DB.set(`progress-${user.id}`, lrn);
+    const t = setTimeout(pushProgress, 3000);
+    return () => clearTimeout(t);
+  },[lrn, user, pushProgress]);
+
+  // Flush pending changes when the tab is hidden/closed
+  useEffect(()=>{
+    const onHide = () => { if (document.visibilityState === "hidden") pushProgress(); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  },[pushProgress]);
+
+  // Save profile (local + cloud)
+  useEffect(()=>{
+    if(!user || !prof.goal) return;
+    DB.set(`profile-${user.id}`, prof);
+    supabase?.from("profiles")
+      .upsert({ id: user.id, goal: prof.goal, region: prof.region, updated_at: new Date().toISOString() })
+      .then(({ error }) => { if (error) console.error("profile:", error); });
   },[prof, user]);
 
   useEffect(() => {
@@ -259,46 +379,68 @@ export default function App(){
   }, [scr, cur]);
 
   // ============ AUTH ============
+  // mode: login | signup | magic (email link, no password) | link (guest → real account by email)
   const handleAuth = async (mode) => {
-    setAuthForm(f=>({...f,loading:true,error:null}));
+    if(!supabase) return;
+    const fail = (msg) => setAuthForm(f=>({...f,error:msg,loading:false}));
+    const done = (info) => setAuthForm(f=>({...f,password:"",error:null,info,loading:false}));
+    setAuthForm(f=>({...f,loading:true,error:null,info:null}));
     const {email, password} = authForm;
-    if(!email || !password){ setAuthForm(f=>({...f,error:"Email and password required",loading:false})); return; }
-    if(password.length < 6){ setAuthForm(f=>({...f,error:"Password must be 6+ characters",loading:false})); return; }
-
-    // Simple email/password auth via persistent storage
-    // In production: replace with Supabase/Firebase auth calls
-    if(mode === "signup"){
-      const existing = await DB.get(`account-${email}`);
-      if(existing){ setAuthForm(f=>({...f,error:"Account already exists. Log in instead.",loading:false})); return; }
-      await DB.set(`account-${email}`, {email, passwordHash: btoa(password), created: Date.now()});
-    } else {
-      const account = await DB.get(`account-${email}`);
-      if(!account){ setAuthForm(f=>({...f,error:"No account found. Sign up first.",loading:false})); return; }
-      if(atob(account.passwordHash) !== password){ setAuthForm(f=>({...f,error:"Incorrect password.",loading:false})); return; }
-    }
-
-    const session = {email, loggedIn: Date.now()};
-    await DB.set("user-session", session);
+    if(!email) return fail("Email required");
     localStorage.setItem(STORAGE_PREFIX + "last-email", email);
-    setUser(session);
+    const redirect = { emailRedirectTo: window.location.origin };
 
-    // Load existing progress
-    const progress = await DB.get(`progress-${email}`);
-    if(progress) setLrn(progress);
-    const profile = await DB.get(`profile-${email}`);
-    if(profile){ setProf(profile); setScr("home"); }
-    else setScr("onb");
+    if(mode === "magic"){
+      const { error } = await supabase.auth.signInWithOtp({ email, options: redirect });
+      return error ? fail(error.message) : done("Check your email for a sign-in link.");
+    }
+    if(mode === "link"){
+      // Same account id is kept, so all guest progress stays
+      const { error } = await supabase.auth.updateUser({ email }, redirect);
+      return error ? fail(error.message) : done("Check your email to confirm. Your progress is kept.");
+    }
+    if(!password) return fail("Password required (or use “Email me a link”)");
+    if(password.length < 6) return fail("Password must be 6+ characters");
+    if(mode === "signup"){
+      const { data, error } = await supabase.auth.signUp({ email, password, options: redirect });
+      if(error) return fail(error.message);
+      if(!data.session) return done("Check your email to confirm your account, then log in.");
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if(error) return fail(error.message);
+    }
+    done(null); // onAuthStateChange loads the user
+  };
 
-    setAuthForm({email:"",password:"",error:null,loading:false});
+  const signInGoogle = async () => {
+    if(!supabase) return;
+    // Guests link Google to their existing account (needs "manual linking" enabled in Supabase)
+    const opts = { provider: "google", options: { redirectTo: window.location.origin } };
+    const { error } = user?.anon
+      ? await supabase.auth.linkIdentity(opts)
+      : await supabase.auth.signInWithOAuth(opts);
+    if(error) setAuthForm(f=>({...f,error:error.message}));
+  };
+
+  const tryAsGuest = async () => {
+    if(!supabase) return;
+    setAuthForm(f=>({...f,loading:true,error:null,info:null}));
+    const { error } = await supabase.auth.signInAnonymously();
+    setAuthForm(f=>({...f,loading:false,error:error?.message||null}));
   };
 
   const logout = async () => {
-    await DB.del("user-session");
+    if(user?.anon && !window.confirm("You're using a guest account. Logging out loses this progress unless you save it to an account first. Log out anyway?")) return;
+    await pushProgress();
+    await supabase?.auth.signOut();
+    loadedUidRef.current = null;
+    syncedRef.current = {};
     setUser(null);
     setLrn({});
     setProf({goal:null,region:"CA"});
     setScr("onb");
     setAuthScr("login");
+    setSync("idle");
   };
 
   // ============ LEARNING ENGINE ============
@@ -451,58 +593,76 @@ export default function App(){
     </div>
   );
 
-  // ---- AUTH SCREEN ----
-  if(!user) return (
-    <div style={{...sh,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{maxWidth:380,width:"100%"}}>
-        <div style={{textAlign:"center",marginBottom:28}}>
-          <div style={{fontSize:40,marginBottom:4}}>🇫🇷</div>
-          <h1 style={{fontSize:22,fontWeight:700,margin:"0 0 4px",letterSpacing:"-.5px"}}>Learn French. Actually.</h1>
-          <p style={{color:"var(--t3)",fontSize:12,margin:0}}>Sign in to save your progress across devices</p>
+  // ---- AUTH SCREEN (sign in, or a guest saving progress to an account) ----
+  const authCard = (guestLink) => {
+    const tab = (k, label) => (
+      <button onClick={()=>{setAuthScr(k);setAuthForm(f=>({...f,error:null,info:null}));}} style={{flex:1,padding:"9px 0",border:"none",fontSize:13,fontWeight:600,cursor:"pointer",background:authScr===k?"var(--ac)":"var(--s1)",color:authScr===k?"#fff":"var(--t2)"}}>{label}</button>
+    );
+    const mode = guestLink ? "link" : authScr;
+    return (
+      <div style={{...sh,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}}>
+        <div style={{maxWidth:380,width:"100%"}}>
+          {guestLink && <button onClick={()=>setScr("home")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer",marginBottom:12}}>← Back</button>}
+          <div style={{textAlign:"center",marginBottom:28}}>
+            <div style={{fontSize:40,marginBottom:4}}>🇫🇷</div>
+            <h1 style={{fontSize:22,fontWeight:700,margin:"0 0 4px",letterSpacing:"-.5px"}}>{guestLink ? "Save your progress" : "Learn French. Actually."}</h1>
+            <p style={{color:"var(--t3)",fontSize:12,margin:0}}>{guestLink ? "Add Google or an email to keep everything you've studied" : "Sign in to save your progress across devices"}</p>
+          </div>
+
+          <div style={{background:"var(--card)",borderRadius:12,padding:20,border:"1px solid var(--s2)"}}>
+            {!supabase ? (
+              <p style={{fontSize:12,color:"var(--dng)",margin:0}}>Accounts aren't configured: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are missing.</p>
+            ) : (<>
+              <Btn onClick={signInGoogle} s={{width:"100%",marginBottom:14,background:"#fff",color:"#1f1f1f"}}>Continue with Google</Btn>
+
+              {!guestLink && (
+                <div style={{display:"flex",marginBottom:16,borderRadius:8,overflow:"hidden",border:"1px solid var(--s2)"}}>
+                  {tab("login","Log in")}{tab("signup","Sign up")}
+                </div>
+              )}
+
+              <div style={{marginBottom:10}}>
+                <label style={{fontSize:11,color:"var(--t3)",display:"block",marginBottom:4}}>Email</label>
+                <Input type="email" placeholder="you@example.com" value={authForm.email} onChange={e=>setAuthForm(f=>({...f,email:e.target.value,error:null}))}
+                  onKeyDown={e=>{if(e.key==="Enter"&&guestLink)handleAuth("link");}} />
+              </div>
+              {!guestLink && (
+                <div style={{marginBottom:14}}>
+                  <label style={{fontSize:11,color:"var(--t3)",display:"block",marginBottom:4}}>Password</label>
+                  <Input type="password" placeholder="6+ characters" value={authForm.password} onChange={e=>setAuthForm(f=>({...f,password:e.target.value,error:null}))}
+                    onKeyDown={e=>{if(e.key==="Enter")handleAuth(mode);}} />
+                </div>
+              )}
+
+              {authForm.error && <p style={{fontSize:12,color:"var(--dng)",margin:"0 0 10px",padding:"8px 10px",background:"rgba(224,84,84,0.08)",borderRadius:8}}>{authForm.error}</p>}
+              {authForm.info && <p style={{fontSize:12,color:"var(--ac2)",margin:"0 0 10px",padding:"8px 10px",background:"rgba(52,191,130,0.08)",borderRadius:8}}>{authForm.info}</p>}
+
+              <Btn onClick={()=>handleAuth(mode)} pri dis={authForm.loading} s={{width:"100%",marginBottom:10}}>
+                {authForm.loading ? "..." : guestLink ? "Save with this email" : authScr==="login" ? "Log in" : "Create account"}
+              </Btn>
+
+              {!guestLink && (
+                <div style={{display:"flex",justifyContent:"space-between",paddingTop:10,borderTop:"1px solid var(--s2)"}}>
+                  <button onClick={()=>handleAuth("magic")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:11,cursor:"pointer",padding:0}}>Email me a link instead</button>
+                  <button onClick={tryAsGuest} style={{background:"none",border:"none",color:"var(--ac)",fontSize:11,cursor:"pointer",padding:0}}>Try without an account →</button>
+                </div>
+              )}
+            </>)}
+          </div>
         </div>
-
-        <div style={{background:"var(--card)",borderRadius:12,padding:20,border:"1px solid var(--s2)"}}>
-          <div style={{display:"flex",marginBottom:16,borderRadius:8,overflow:"hidden",border:"1px solid var(--s2)"}}>
-            <button onClick={()=>setAuthScr("login")} style={{flex:1,padding:"9px 0",border:"none",fontSize:13,fontWeight:600,cursor:"pointer",background:authScr==="login"?"var(--ac)":"var(--s1)",color:authScr==="login"?"#fff":"var(--t2)"}}>Log in</button>
-            <button onClick={()=>setAuthScr("signup")} style={{flex:1,padding:"9px 0",border:"none",fontSize:13,fontWeight:600,cursor:"pointer",background:authScr==="signup"?"var(--ac)":"var(--s1)",color:authScr==="signup"?"#fff":"var(--t2)"}}>Sign up</button>
-          </div>
-
-          <div style={{marginBottom:10}}>
-            <label style={{fontSize:11,color:"var(--t3)",display:"block",marginBottom:4}}>Email</label>
-            <Input type="email" placeholder="you@example.com" value={authForm.email} onChange={e=>setAuthForm(f=>({...f,email:e.target.value,error:null}))} />
-          </div>
-          <div style={{marginBottom:14}}>
-            <label style={{fontSize:11,color:"var(--t3)",display:"block",marginBottom:4}}>Password</label>
-            <Input type="password" placeholder="6+ characters" value={authForm.password} onChange={e=>setAuthForm(f=>({...f,password:e.target.value,error:null}))}
-              onKeyDown={e=>{if(e.key==="Enter")handleAuth(authScr);}} />
-          </div>
-
-          {authForm.error && <p style={{fontSize:12,color:"var(--dng)",margin:"0 0 10px",padding:"8px 10px",background:"rgba(224,84,84,0.08)",borderRadius:8}}>{authForm.error}</p>}
-
-          <Btn onClick={()=>handleAuth(authScr)} pri dis={authForm.loading} s={{width:"100%",marginBottom:10}}>
-            {authForm.loading ? "..." : authScr==="login" ? "Log in" : "Create account"}
-          </Btn>
-
-          <div style={{textAlign:"center",padding:"10px 0 4px",borderTop:"1px solid var(--s2)"}}>
-            <p style={{fontSize:11,color:"var(--t3)",margin:0}}>
-              🔒 Google login coming soon
-            </p>
-          </div>
-        </div>
-
-        <p style={{textAlign:"center",fontSize:10,color:"var(--t3)",marginTop:16}}>
-          Your progress is saved and synced to your account
-        </p>
       </div>
-    </div>
-  );
+    );
+  };
+
+  if(!user) return authCard(false);
+  if(scr==="link" && user.anon) return authCard(true);
 
   // ---- ONBOARDING ----
   if(scr==="onb") return (
     <div style={{...sh,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}}>
       <div style={{maxWidth:420,width:"100%"}}>
         <div style={{textAlign:"center",marginBottom:20}}>
-          <h1 style={{fontSize:22,fontWeight:700,margin:"0 0 4px"}}>Welcome, {user.email.split("@")[0]}</h1>
+          <h1 style={{fontSize:22,fontWeight:700,margin:"0 0 4px"}}>Welcome{user.email ? `, ${user.email.split("@")[0]}` : ""}</h1>
           <p style={{color:"var(--t3)",fontSize:12,margin:0}}>Set up your learning goal</p>
         </div>
         <label style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",display:"block",marginBottom:6}}>Why are you learning?</label>
@@ -879,7 +1039,8 @@ export default function App(){
         <div>
           <h1 style={{fontSize:17,fontWeight:700,margin:0}}>🇫🇷 French</h1>
           <span style={{fontSize:9,color:"var(--t3)"}}>
-            {user.email.split("@")[0]} · {ex?.name||"Personal"}
+            {user.email ? user.email.split("@")[0] : "Guest"} · {ex?.name||"Personal"}
+            {sync!=="idle"&&<span style={{color:sync==="offline"?"var(--dng)":"var(--t3)"}}> · {sync==="saving"?"☁ saving…":sync==="saved"?"☁ saved":"☁ offline"}</span>}
             {ex?.nclc&&<span style={{color:"var(--ac)",fontWeight:600}}> · NCLC {Math.max(...Object.values(ex.nclc))}+</span>}
           </span>
         </div>
@@ -888,6 +1049,7 @@ export default function App(){
             style={{background:audioOn?"rgba(75,133,224,0.15)":"var(--s1)",border:`1px solid ${audioOn?"var(--ac)":"var(--s2)"}`,borderRadius:7,padding:"4px 8px",color:audioOn?"var(--ac)":"var(--t3)",fontSize:10,cursor:"pointer"}}>
             {audioOn?"🔊":"🔇"}
           </button>
+          {user.anon&&<button onClick={()=>{setAuthForm(f=>({...f,error:null,info:null}));setScr("link");}} style={{background:"rgba(52,191,130,0.12)",border:"1px solid var(--ac2)",borderRadius:7,padding:"4px 8px",color:"var(--ac2)",fontSize:10,cursor:"pointer"}}>Save progress</button>}
           <button onClick={()=>setScr("onb")} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:7,padding:"4px 8px",color:"var(--t2)",fontSize:10,cursor:"pointer"}}>⚙</button>
           <button onClick={logout} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:7,padding:"4px 8px",color:"var(--t3)",fontSize:10,cursor:"pointer"}}>↪ out</button>
         </div>
