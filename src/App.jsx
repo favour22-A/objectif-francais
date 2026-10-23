@@ -23,7 +23,15 @@ const normalizeLexique = (raw) => raw.map(({ id, w, l, p, g, gn, lv, fs, fw, sy,
 const CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"];
 const LIST_LIMIT = 200;
 
-const EXAMS={fm:{name:"Francophone Mobility (C16)",exam:"TCF Canada",sk:["speaking","listening"],desc:"NCLC 5+ speaking & listening",nclc:{listening:5,speaking:5},cefr:"B1"},pr:{name:"PR — Express Entry / PNP",exam:"TCF Canada",sk:["listening","speaking","reading","writing"],desc:"NCLC 7+ all skills",nclc:{listening:7,speaking:7,reading:7,writing:7},cefr:"B2"},cit:{name:"Citizenship",exam:"TCF Canada",sk:["listening","speaking"],desc:"NCLC 4+ speaking & listening",nclc:{listening:4,speaking:4},cefr:"A2–B1"},per:{name:"Personal",exam:null,sk:["listening","speaking","reading","writing"],desc:"Learn at your pace",nclc:null,cefr:null}};
+// Learning goals (detailed exam/program questions come later, after the learner has used the app a while)
+const GOALS={
+  imm:{name:"French for Canadian immigration",short:"Immigration",desc:"TCF / TEF Canada: work permits, PR, citizenship"},
+  per:{name:"Personal",short:"Personal",desc:"Travel, culture, at your own pace"},
+  pro:{name:"Work or school",short:"Work / school",desc:"French for your job or your studies"},
+};
+const COMMUNITY_ID0 = 1000000; // community words get ids above every Lexique id
+const goalKey=(g)=>["fm","pr","cit"].includes(g)?"imm":g; // old goal keys → immigration
+const G_LABEL={adj:"adjective",adv:"adverb",noun:"noun",verb:"verb",pron:"pronoun",other:"other"};
 const REGIONS={FR:"France",CA:"Canada",BE:"Belgique",AF:"Afrique francophone"};
 const RF={FR:"🇫🇷",CA:"🇨🇦",BE:"🇧🇪",AF:"🌍"};
 const SUFFIXES=[{s:"-ment",from:"adj(fem)",to:"adverb",ex:"lente→lentement",r:"Add -ment to feminine adj"},{s:"-tion/-sion",from:"verb",to:"noun",ex:"informer→information",r:"Action/result"},{s:"-eur/-euse",from:"verb",to:"person",ex:"travailler→travailleur",r:"Doer"},{s:"-able/-ible",from:"verb",to:"adj",ex:"comprendre→compréhensible",r:"Can be done"},{s:"re-/ré-",from:"verb",to:"again",ex:"faire→refaire",r:"Do again"},{s:"dé-/des-",from:"verb",to:"opposite",ex:"faire→défaire",r:"Undo"}];
@@ -68,7 +76,7 @@ const TR = {
 "permettre":"to allow","recevoir":"to receive","essayer":"to try",
 "expliquer":"to explain","jouer":"to play","monter":"to go up / climb"
 };
-const tr = (w) => TR[w.lm] || TR[w.w] || null;
+const tr = (w) => w.tr || TR[w.lm] || TR[w.w] || null; // w.tr = community translation
 // Live translation fetch for words not in TR table (free MyMemory API)
 const TR_CACHE_KEY = "objectif-francais:tr-cache";
 const loadTrCache = () => { try { return JSON.parse(localStorage.getItem(TR_CACHE_KEY)||"{}"); } catch { return {}; } };
@@ -163,9 +171,141 @@ const AudioBtn=({text,rate,label="🔊",s:st})=>(
   </button>
 );
 
+// ============ TEXT ANALYSIS (paste a text → words, sentences, what you don't know yet) ============
+// NOTE: lexique383_full.json has ~1 form per word and no function words, so we add:
+// a grammar-word list, common irregular verb forms, and a light rule-based lemmatizer.
+const WORD_RE = /[\p{L}\p{M}]+(?:['’-][\p{L}\p{M}]+)*['’]?/gu;
+const ELISION = /^(jusqu|lorsqu|puisqu|quoiqu|qu|l|d|j|m|n|s|t|c)'/;
+
+const GRAMMAR = new Set(("le la les l un une des du de d au aux ce c cet cette ces son sa ses mon ma mes ton ta tes notre nos votre vos leur leurs " +
+  "je j tu il elle on nous vous ils elles me m te t se s lui y en moi toi soi eux que qu qui quoi dont où et ou mais donc or ni car ne n pas " +
+  "à dans par pour sur avec sans sous chez vers entre comme si ceci cela ça celui celle ceux celles lequel laquelle lesquels lesquelles " +
+  "duquel auquel jusque jusqu lorsque lorsqu puisque puisqu quoique quoiqu").split(" "));
+
+const IRREG = {};
+[["être","suis es est sommes êtes sont étais était étions étiez étaient été serai seras sera serons serez seront serais serait serions seriez seraient sois soit soyons soyez soient fus fut furent étant"],
+ ["avoir","ai as a avons avez ont avais avait avions aviez avaient eu eue eus eut eurent aurai auras aura aurons aurez auront aurais aurait aurions auriez auraient aie aies ait ayons ayez aient ayant"],
+ ["aller","vais vas va allons allez vont irai iras ira irons irez iront irais irait iraient aille ailles aillent allé allée allés"],
+ ["faire","fais fait faisons faites font ferai feras fera ferons ferez feront ferais ferait feraient fasse fasses fassent faisais faisait faisaient fit firent faisant"],
+ ["pouvoir","peux peut pouvons pouvez peuvent pourrai pourras pourra pourrons pourrez pourront pourrais pourrait pourraient pu puisse puissent pouvais pouvait pouvaient"],
+ ["vouloir","veux veut voulons voulez veulent voudrai voudra voudrais voudrait voudraient voulu voulais voulait voulaient veuille"],
+ ["savoir","sais sait savons savez savent saurai saura saurais saurait su sache sachent savais savait savaient"],
+ ["venir","viens vient venons venez viennent viendrai viendra viendrais viendrait venu venue venus venais venait venaient vint"],
+ ["dire","dis dit disons dites disent dirai dira dirais dirait disais disait disaient dite"],
+ ["voir","vois voit voyons voyez voient verrai verra verrais verrait vu vue vus voyais voyait voyaient"],
+ ["prendre","prends prend prenons prenez prennent prendrai prendra prendrait pris prise prenais prenait prenaient"],
+ ["devoir","dois doit devons devez doivent devrai devra devrais devrait devraient dû due devais devait devaient"],
+ ["mettre","mets met mettons mettez mettent mis mise mettais mettait"],
+ ["falloir","faut faudra faudrait fallait fallu"],
+ ["beau","belle belles beaux bel"],["nouveau","nouvelle nouvelles nouveaux nouvel"],["vieux","vieille vieilles vieil"],["fou","folle folles fous"],["mou","molle molles"],
+].forEach(([inf, forms]) => forms.split(" ").forEach(f => { IRREG[f] = inf; }));
+
+// [suffix, replacement, expected grammar] — tried longest-first, first hit in the dictionary wins
+const LEMMA_RULES = [
+  ["aux","al","noun"],["euses","eux",null],["euse","eux",null],["ives","if",null],["ive","if",null],["ères","er",null],["ère","er",null],
+  ["nnes","n",null],["nne","n",null],["lles","l",null],["lle","l",null],["ttes","t",null],["tte","t",null],
+  ["es","",null],["s","",null],["x","",null],["e","",null],
+  ["eraient","er","verb"],["erions","er","verb"],["eriez","er","verb"],["erais","er","verb"],["erait","er","verb"],["erons","er","verb"],["erez","er","verb"],["eront","er","verb"],["erai","er","verb"],["eras","er","verb"],["era","er","verb"],
+  ["issaient","ir","verb"],["issions","ir","verb"],["issiez","ir","verb"],["issais","ir","verb"],["issait","ir","verb"],["issons","ir","verb"],["issez","ir","verb"],["issent","ir","verb"],["issant","ir","verb"],
+  ["eaient","er","verb"],["eais","er","verb"],["eait","er","verb"],["eons","er","verb"],["eant","er","verb"],
+  ["çaient","cer","verb"],["çais","cer","verb"],["çait","cer","verb"],["çons","cer","verb"],["çant","cer","verb"],
+  ["aient","er","verb"],["èrent","er","verb"],["ions","er","verb"],["iez","er","verb"],["ais","er","verb"],["ait","er","verb"],["ant","er","verb"],
+  ["ons","er","verb"],["ez","er","verb"],["ent","er","verb"],["ées","er","verb"],["és","er","verb"],["ée","er","verb"],["é","er","verb"],["es","er","verb"],["e","er","verb"],["a","er","verb"],["ai","er","verb"],["as","er","verb"],
+  ["ies","ir","verb"],["ie","ir","verb"],["is","ir","verb"],["it","ir","verb"],["i","ir","verb"],
+  ["ons","re","verb"],["ez","re","verb"],["ent","re","verb"],["ais","re","verb"],["ait","re","verb"],["ues","re","verb"],["ue","re","verb"],["us","re","verb"],["u","re","verb"],["s","re","verb"],["t","re","verb"],["","re","verb"],
+].sort((a,b) => b[0].length - a[0].length);
+
+function lemmatize(key, idx) {
+  for (const [suf, rep, g] of LEMMA_RULES) {
+    if (!key.endsWith(suf) || key.length - suf.length < 2) continue;
+    const c = key.slice(0, key.length - suf.length) + rep;
+    if (c === key) continue;
+    const w = idx.get(c);
+    if (w && (!g || w.g === g)) return w;
+  }
+  return null;
+}
+
+// Common English words, used to spot English text (ambiguous ones like "a", "on", "me" left out)
+const EN_WORDS = new Set(("the of and to in is it that was for with he she they we you i this be are have has had not at by from his her their our your " +
+  "what which who when where why how there here would could should will can do does did been being were an but if so no yes my him them " +
+  "all any some more most other than then very just also only about into over after before because while through out up down off again new " +
+  "one two get got make made know think see look want going come take give use find tell ask work seem feel try leave call good well way even " +
+  "back still something nothing everything people time year day thing man woman life world hand part place case week point same").split(" "));
+
+const splitSentences = (text) =>
+  (text.replace(/\s+/g, " ").trim().match(/[^.!?…]+(?:[.!?…]+["»”’)\]]*|$)/g) || [])
+    .map(s => s.trim()).filter(s => /[\p{L}]/u.test(s));
+
+// One raw token → pieces (handles l'homme, qu'il, est-ce, dit-il, hommes, mangeons)
+function expandToken(raw, idx, noGuess) {
+  const key = raw.toLowerCase().replace(/’/g, "'").replace(/'$/, "");
+  if (!key) return [];
+  if (GRAMMAR.has(key)) return [{ raw, key, w: null, grammar: true }];
+  if (IRREG[key]) { const w = idx.get(IRREG[key]); if (w) return [{ raw, key, w }]; }
+  const w = idx.get(key);
+  if (w) return [{ raw, key, w }];
+  const el = key.match(ELISION);
+  if (el && key.length > el[0].length) {
+    return [{ raw: el[1] + "'", key: el[1] + "'", w: null, grammar: true }, ...expandToken(key.slice(el[0].length), idx)];
+  }
+  if (key.includes("-")) return key.split("-").filter(k => k.length > 1).flatMap(k => expandToken(k, idx, noGuess));
+  // Capitalized words mid-sentence are likely names: don't guess a lemma for them
+  const lw = noGuess ? null : lemmatize(key, idx);
+  if (lw) return [{ raw, key, w: lw, guess: true }];
+  return [{ raw, key, w: null }];
+}
+
+const classifyToken = (t, lang, isFirst) =>
+  t.grammar ? "grammar"
+  : lang === "en" ? "en"
+  : t.w ? "fr"
+  : EN_WORDS.has(t.key) ? "en"
+  : (!isFirst && /^\p{Lu}/u.test(t.raw)) ? "name" : "unmatched";
+
+function analyzeText(text, idx) {
+  const sentences = splitSentences(text).map(s => {
+    const toks = (s.match(WORD_RE) || []).flatMap((raw, i) => expandToken(raw, idx, i > 0 && /^\p{Lu}/u.test(raw)).map(t => ({ ...t, first: i === 0 })));
+    const en = toks.filter(t => EN_WORDS.has(t.key)).length;
+    const fr = toks.filter(t => (t.w || t.grammar) && !EN_WORDS.has(t.key)).length;
+    const lang = en > fr ? "en" : "fr";
+    toks.forEach(t => { t.cls = classifyToken(t, lang, t.first); });
+    return { text: s, toks, lang };
+  });
+  // Unique words: French grouped by dictionary entry, the rest by surface form
+  const fr = new Map(), other = { en: new Map(), name: new Map(), unmatched: new Map() };
+  let total = 0;
+  for (const s of sentences) for (const t of s.toks) {
+    total++;
+    if (t.cls === "grammar") continue;
+    if (t.cls === "fr") {
+      const e = fr.get(t.w.id) || { w: t.w, forms: new Set(), count: 0 };
+      e.forms.add(t.key); e.count++; fr.set(t.w.id, e);
+    } else {
+      const m = other[t.cls]; m.set(t.key, (m.get(t.key) || 0) + 1);
+    }
+  }
+  return { sentences, fr: [...fr.values()], other, total };
+}
+
 export default function App(){
   // Dictionary state
-  const [L, setL] = useState([]);
+  const [baseL, setBaseL] = useState([]);
+  const [community, setCommunity] = useState([]); // rows from Supabase dict_entries
+  const [isEditor, setIsEditor] = useState(false);
+  const [editForm, setEditForm] = useState({});
+  const [pwForm, setPwForm] = useState({});
+  // Dictionary = Lexique + community corrections + community-added words
+  const L = useMemo(() => {
+    if (!community.length) return baseL;
+    const over = new Map(), add = [];
+    community.forEach(r => r.base_id != null ? over.set(r.base_id, r) : add.push(r));
+    const pick = (r) => Object.fromEntries(["lm","g","gn","lv","p","tr","note"].filter(k => r[k] != null && r[k] !== "").map(k => [k, r[k]]));
+    const out = baseL.map(w => { const r = over.get(w.id); return r ? { ...w, ...pick(r), cid: r.id } : w; });
+    add.forEach(r => out.push({ id: COMMUNITY_ID0 + r.id, w: r.w, lm: r.lm || r.w, p: r.p || "", g: r.g || "other", gn: r.gn || null,
+      lv: r.lv || "", fs: 0, fw: 0, sy: 0, fm: [], tr: r.tr || null, note: r.note || null, cid: r.id, community: true }));
+    return out;
+  }, [baseL, community]);
   const [dictLoading, setDictLoading] = useState(true);
   const [dictError, setDictError] = useState(null);
 
@@ -202,6 +342,9 @@ export default function App(){
   const [shuffledPool, setShuffledPool] = useState([]);
   const [liveTr, setLiveTr] = useState({});
   const [bulkSrch, setBulkSrch] = useState("");
+  const [txtDraft, setTxtDraft] = useState("");
+  const [txt, setTxt] = useState("");
+  const [wordBack, setWordBack] = useState("home");
   const [audioOn, setAudioOn] = useState(() => localStorage.getItem(STORAGE_PREFIX + "audio-on") !== "0");
   const [audioRate, setAudioRate] = useState(() => {
     const r = parseFloat(localStorage.getItem(STORAGE_PREFIX + "audio-rate"));
@@ -216,6 +359,18 @@ export default function App(){
     }
     return idx;
   }, [L]);
+
+  // Lookup for text analysis: exact form first, then lemma; most frequent entry wins ties
+  const formIndex = useMemo(() => {
+    const ex = new Map(), lm = new Map();
+    for (const w of L) {
+      const a = w.w.toLowerCase(), b = (w.lm || "").toLowerCase();
+      if (!ex.has(a) || (w.fs || 0) > (ex.get(a).fs || 0)) ex.set(a, w);
+      if (b && (!lm.has(b) || (w.fs || 0) > (lm.get(b).fs || 0))) lm.set(b, w);
+    }
+    return { get: k => ex.get(k) || lm.get(k) };
+  }, [L]);
+  const txtAnalysis = useMemo(() => txt.trim() ? analyzeText(txt, formIndex) : null, [txt, formIndex]);
 
   const findWord = useCallback((form) => wordIndex.get(form.toLowerCase()), [wordIndex]);
 
@@ -234,7 +389,7 @@ export default function App(){
     (async()=>{
       try {
         const mod = await import("../data/lexique383_full.json");
-        if (!cancelled) setL(normalizeLexique(mod.default));
+        if (!cancelled) setBaseL(normalizeLexique(mod.default));
       } catch (e) {
         if (!cancelled) setDictError(e.message || "Failed to load dictionary");
       } finally {
@@ -264,7 +419,11 @@ export default function App(){
     let p = (await DB.get(`profile-${uid}`)) || (email ? await DB.get(`profile-${email}`) : null);
     const { data: cp } = await supabase.from("profiles").select("goal,region").eq("id", uid).maybeSingle();
     if (cp?.goal) p = { goal: cp.goal, region: cp.region || "CA" };
-    if (p?.goal) { setProf(p); setScr("home"); } else setScr("onb");
+    // Only brand-new users see the welcome screen; anyone with saved progress goes straight home
+    const returning = Object.keys(cloud).length || Object.keys(local).length || Object.keys(legacy).length;
+    if (p?.goal) { setProf(p); setScr("home"); }
+    else if (returning) { if (p) setProf(p); setScr("home"); }
+    else setScr("onb");
 
     loadedUidRef.current = uid;
     setUser({ id: uid, email, anon: !!sbUser.is_anonymous });
@@ -571,6 +730,73 @@ export default function App(){
     setSaving(false);
   };
 
+  // Ticking ✓ in the text analyzer means "I know this": straight to known (3 passes)
+  const setKnown = (ids) => setLrn(p => {
+    const u = { ...p }, now = Date.now();
+    ids.forEach(id => { const e = p[id] || {}; u[id] = { ...e, ps: Math.max(e.ps || 0, 3), fam: 0, fl: e.fl || 0, iv: Math.max(e.iv || 1, 16), t: now }; });
+    return u;
+  });
+
+  const goalButtons = Object.entries(GOALS).map(([k,g])=>(
+    <button key={k} onClick={()=>setProf(p=>({...p,goal:k}))} style={{display:"block",width:"100%",textAlign:"left",padding:"12px 14px",marginBottom:6,background:goalKey(prof.goal)===k?"var(--s3)":"var(--s1)",border:goalKey(prof.goal)===k?"1.5px solid var(--ac)":"1.5px solid var(--s2)",borderRadius:9,color:"var(--t1)",cursor:"pointer",fontSize:14}}>
+      <strong>{g.name}</strong>
+      <span style={{display:"block",fontSize:11,color:"var(--t3)",marginTop:2}}>{g.desc}</span>
+    </button>
+  ));
+
+  // ---- Community dictionary ----
+  const loadCommunity = useCallback(async () => {
+    if (!supabase) return;
+    const { data, error } = await supabase.from("dict_entries").select("*").limit(10000);
+    if (error) console.error("dictionary:", error); else setCommunity(data || []);
+  }, []);
+  useEffect(() => { loadCommunity(); }, [loadCommunity]);
+  useEffect(() => {
+    if (!supabase || !user || user.anon) { setIsEditor(false); return; }
+    supabase.rpc("is_editor").then(({ data }) => setIsEditor(!!data));
+  }, [user]);
+
+  const redeemCode = async () => {
+    const { data, error } = await supabase.rpc("redeem_editor_code", { code: editForm.code || "" });
+    if (error || !data) return setEditForm(f => ({ ...f, ok: false, msg: error?.message || "Wrong password." }));
+    setIsEditor(true); setEditForm({ ok: true, msg: "Welcome! You can now add and fix words." });
+  };
+  const openContrib = (word) => {
+    const w = typeof word === "string" ? null : word;
+    setEditForm(w
+      ? { cid: w.cid, w: w.w, lm: w.lm && w.lm !== w.w ? w.lm : "", g: w.g || "", gn: w.gn || "", lv: w.lv || "", p: w.p || "", tr: tr(w) || "", note: w.note || "" }
+      : { w: word || "" });
+    setScr("contrib");
+  };
+  const saveEntry = async (baseId) => {
+    const f = editForm;
+    const row = Object.fromEntries(["w","lm","g","gn","lv","p","tr","note"].map(k => [k, (f[k] || "").trim() || null]));
+    if (!row.w) return;
+    setEditForm(x => ({ ...x, saving: true, msg: null }));
+    const q = f.cid
+      ? supabase.from("dict_entries").update({ ...row, updated_at: new Date().toISOString() }).eq("id", f.cid)
+      : supabase.from("dict_entries").insert({ ...row, base_id: baseId ?? null });
+    const { error } = await q;
+    if (error) return setEditForm(x => ({ ...x, saving: false, ok: false, msg: error.message }));
+    await loadCommunity();
+    setEditForm({ ok: true, msg: `Saved “${row.w}”. Everyone sees it on their next load.` });
+  };
+  const changePassword = async () => {
+    const { pw1 = "", pw2 = "" } = pwForm;
+    if (pw1.length < 6) return setPwForm(f => ({ ...f, ok: false, msg: "Password must be 6+ characters" }));
+    if (pw1 !== pw2) return setPwForm(f => ({ ...f, ok: false, msg: "Passwords don't match" }));
+    setPwForm(f => ({ ...f, busy: true, msg: null }));
+    const { error } = await supabase.auth.updateUser({ password: pw1 });
+    setPwForm(error ? { ok: false, msg: error.message } : { ok: true, msg: "Password updated." });
+  };
+
+  const deleteEntry = async (r) => {
+    if (!window.confirm(`Delete the community entry for “${r.w}”?`)) return;
+    const { error } = await supabase.from("dict_entries").delete().eq("id", r.id);
+    if (error) return setEditForm(x => ({ ...x, ok: false, msg: error.message }));
+    loadCommunity();
+  };
+
   // ============ RENDER ============
 
   // Dictionary loading
@@ -665,31 +891,122 @@ export default function App(){
           <h1 style={{fontSize:22,fontWeight:700,margin:"0 0 4px"}}>Welcome{user.email ? `, ${user.email.split("@")[0]}` : ""}</h1>
           <p style={{color:"var(--t3)",fontSize:12,margin:0}}>Set up your learning goal</p>
         </div>
-        <label style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",display:"block",marginBottom:6}}>Why are you learning?</label>
-        {Object.entries(EXAMS).map(([k,ex])=>(
-          <button key={k} onClick={()=>setProf(p=>({...p,goal:k}))} style={{display:"block",width:"100%",textAlign:"left",padding:"10px 12px",marginBottom:4,background:prof.goal===k?"var(--s3)":"var(--s1)",border:prof.goal===k?"1.5px solid var(--ac)":"1.5px solid var(--s2)",borderRadius:9,color:"var(--t1)",cursor:"pointer",fontSize:13}}>
-            <strong>{ex.name}</strong>
-            <span style={{display:"block",fontSize:11,color:"var(--t3)",marginTop:1}}>{ex.desc}</span>
-            {ex.nclc&&<span style={{fontSize:10,color:"var(--ac)",fontWeight:600}}>NCLC {Math.max(...Object.values(ex.nclc))}+ ≈ {ex.cefr}</span>}
-          </button>
-        ))}
-        <label style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",display:"block",margin:"12px 0 6px"}}>Region</label>
-        <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:16}}>
-          {Object.entries(REGIONS).map(([c,n])=>(
-            <button key={c} onClick={()=>setProf(p=>({...p,region:c}))} style={{padding:"6px 12px",borderRadius:16,fontSize:11,border:"none",cursor:"pointer",background:prof.region===c?"var(--ac)":"var(--s2)",color:prof.region===c?"#fff":"var(--t2)"}}>{RF[c]} {n}</button>
-          ))}
-        </div>
+        <label style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",display:"block",marginBottom:6}}>Why are you learning French?</label>
+        {goalButtons}
+        <div style={{height:12}}/>
         <Btn onClick={()=>prof.goal&&setScr("home")} pri dis={!prof.goal} s={{width:"100%"}}>Continue</Btn>
       </div>
     </div>
   );
+
+  // ---- TEXT ANALYSIS ----
+  if(scr==="text"){
+    const A = txtAnalysis;
+    const frTok = A ? A.fr.reduce((n,e)=>n+e.count,0) : 0;
+    const knownTok = A ? A.fr.filter(e=>st(e.w.id)==="known").reduce((n,e)=>n+e.count,0) : 0;
+    const toLearn = A ? A.fr.filter(e=>st(e.w.id)!=="known").sort((a,b)=>b.count-a.count||(b.w.fs||0)-(a.w.fs||0)) : [];
+    const pct = frTok ? Math.round(knownTok/frTok*100) : 0;
+    const knownUnique = A ? A.fr.length - toLearn.length : 0;
+    const chip = (k,n,c,add)=><span key={k} onClick={add&&isEditor?()=>openContrib(k):undefined} title={add&&isEditor?"Add to dictionary":undefined} style={{display:"inline-block",padding:"2px 8px",margin:"0 4px 4px 0",borderRadius:10,background:"var(--s2)",fontSize:11,color:c||"var(--t2)",cursor:add&&isEditor?"pointer":"default"}}>{k}{n>1?` ×${n}`:""}{add&&isEditor?" ＋":""}</span>;
+    const clsColor = (t)=> t.cls==="grammar" ? "var(--t1)" : t.cls==="fr" ? statusColor(st(t.w.id)) : t.cls==="en" ? "var(--t3)" : t.cls==="name" ? "var(--t2)" : "var(--dng)";
+    const renderSentence = (s)=> s.text.split(/([\p{L}\p{M}]+(?:['’-][\p{L}\p{M}]+)*['’]?)/u).map((part,i)=>{
+      if(i%2===0) return <span key={i}>{part}</span>;
+      const pieces = expandToken(part, formIndex, i>1 && /^\p{Lu}/u.test(part)).map(p=>({...p,cls:classifyToken(p,s.lang,i===1)}));
+      const tt = pieces.find(p=>p.cls==="fr" && st(p.w.id)!=="known") || pieces.find(p=>p.cls!=="grammar") || pieces[0];
+      if(!tt) return <span key={i}>{part}</span>;
+      const unknown = tt.cls==="fr" && st(tt.w.id)!=="known";
+      return <span key={i} onClick={tt.w&&tt.cls==="fr"?()=>{setCur(tt.w);setWordBack("text");setScr("word");}:undefined}
+        style={{color:tt.cls==="fr"&&!unknown?"var(--t1)":clsColor(tt),borderBottom:unknown?`2px solid ${clsColor(tt)}`:"none",cursor:tt.cls==="fr"?"pointer":"default",fontStyle:tt.cls==="en"?"italic":"normal"}}>{part}</span>;
+    });
+    return (
+      <div style={sh}>
+        <div style={{padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid var(--s2)"}}>
+          <button onClick={()=>setScr("labs")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
+          <span style={{fontSize:14,fontWeight:600}}>📄 Analyze a text</span>
+          <span style={{width:20}}/>
+        </div>
+        <div style={{padding:"12px 16px",maxWidth:640,margin:"0 auto"}}>
+          <textarea value={txtDraft} onChange={e=>setTxtDraft(e.target.value)} placeholder="Paste a French text: an article, a chapter, song lyrics, an exam passage…"
+            style={{width:"100%",minHeight:140,padding:"11px 14px",borderRadius:9,border:"1.5px solid var(--s2)",background:"var(--s1)",color:"var(--t1)",fontSize:13,lineHeight:1.5,boxSizing:"border-box",resize:"vertical",fontFamily:"inherit"}}/>
+          <div style={{display:"flex",gap:6,margin:"8px 0 14px"}}>
+            <Btn onClick={()=>setTxt(txtDraft)} pri dis={!txtDraft.trim()} s={{flex:1}}>Analyze</Btn>
+            <Btn onClick={()=>{setTxtDraft("");setTxt("");}} s={{background:"var(--s2)"}}>Clear</Btn>
+          </div>
+
+          {A && (<>
+            {/* Summary */}
+            <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:8}}>
+              {[{l:"Words",c:A.total},{l:"French (unique)",c:A.fr.length},{l:"To learn",c:toLearn.length,cl:"var(--acw)"},{l:"Sentences",c:A.sentences.length}].map(s=>(
+                <div key={s.l} style={{flex:"1 1 22%",minWidth:80,background:"var(--s1)",borderRadius:9,padding:"8px 0",textAlign:"center"}}>
+                  <div style={{fontSize:18,fontWeight:700,color:s.cl||"var(--t1)"}}>{s.c}</div>
+                  <div style={{fontSize:9,color:"var(--t3)"}}>{s.l}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:11,color:"var(--t2)",marginBottom:4}}>You know <strong style={{color:"var(--ac2)"}}>{knownUnique} of {A.fr.length}</strong> different words here. Counting repeats, that covers <strong style={{color:"var(--ac2)"}}>{pct}%</strong> of the text (grammar words like le, de, et not counted).</div>
+            <div style={{height:5,borderRadius:3,background:"var(--s2)",marginBottom:16,overflow:"hidden"}}><div style={{width:`${pct}%`,height:"100%",background:"var(--ac2)"}}/></div>
+
+            {/* Words to learn */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+              <span style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px"}}>Words you don't know yet ({toLearn.length})</span>
+              {toLearn.length>0&&<button onClick={()=>{if(window.confirm(`Mark all ${toLearn.length} as known?`))setKnown(toLearn.map(e=>e.w.id));}}
+                style={{background:"none",border:"none",color:"var(--ac2)",fontSize:11,cursor:"pointer"}}>Mark all known</button>}
+            </div>
+            {toLearn.slice(0,300).map(e=>{
+              const s=st(e.w.id);
+              const forms=[...e.forms].filter(f=>f!==(e.w.g==="verb"&&e.w.lm?e.w.lm:e.w.w));
+              return (
+                <div key={e.w.id} style={{display:"flex",alignItems:"center",gap:6,background:"var(--s1)",border:"1px solid var(--s2)",borderLeft:`3px solid ${statusColor(s)}`,borderRadius:9,padding:"8px 10px",marginBottom:5}}>
+                  <div onClick={()=>{setCur(e.w);setWordBack("text");setScr("word");}} style={{flex:1,cursor:"pointer",minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:600}}>{e.w.g==="verb"&&e.w.lm?e.w.lm:e.w.w}{forms.length>0&&<span style={{fontSize:10,color:"var(--t3)",fontWeight:400}}> ({forms.slice(0,3).join(", ")})</span>} <span style={{fontSize:10,color:"var(--t3)",fontWeight:400}}>×{e.count}</span></div>
+                    <div style={{fontSize:11,color:"var(--t2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tr(e.w)||liveTr[e.w.lm]||""} <span style={{color:"var(--t3)"}}>{e.w.lv} · {statusLabel(s)}</span></div>
+                  </div>
+                  <AudioBtn text={e.w.w} rate={audioRate} s={{padding:"4px 7px",fontSize:12}}/>
+                  <button title="I know it" onClick={()=>setKnown([e.w.id])} style={{background:"rgba(52,191,130,0.1)",border:"none",borderRadius:7,padding:"5px 8px",color:"var(--ac2)",cursor:"pointer"}}>✓</button>
+                  <button title="Familiar" onClick={()=>mark(e.w.id,"familiar")} style={{background:"rgba(224,147,72,0.1)",border:"none",borderRadius:7,padding:"5px 8px",color:"var(--acw)",cursor:"pointer"}}>≈</button>
+                  <button title="Don't know" onClick={()=>mark(e.w.id,"unknown")} style={{background:"rgba(224,84,84,0.1)",border:"none",borderRadius:7,padding:"5px 8px",color:"var(--dng)",cursor:"pointer"}}>✗</button>
+                </div>
+              );
+            })}
+            {toLearn.length>300&&<p style={{fontSize:10,color:"var(--t3)"}}>Showing the 300 most frequent.</p>}
+
+            {/* Not in dictionary / English / names */}
+            {[["unmatched","Not in the dictionary (conjugations, typos, slang)","var(--dng)"],["name","Names",null],["en","English",null]].map(([k,label,c])=>A.other[k].size>0&&(
+              <div key={k} style={{marginTop:14}}>
+                <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",marginBottom:6}}>{label} ({A.other[k].size})</div>
+                <div>{[...A.other[k]].sort((a,b)=>b[1]-a[1]).slice(0,150).map(([w,n])=>chip(w,n,c,k==="unmatched"))}</div>
+              </div>
+            ))}
+
+            {/* Sentences */}
+            <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",margin:"18px 0 6px"}}>Sentences ({A.sentences.length})</div>
+            {A.sentences.slice(0,400).map((s,i)=>{
+              const frT=s.toks.filter(t=>t.cls==="fr"&&!t.particle);
+              const unk=frT.filter(t=>st(t.w.id)!=="known").length;
+              return (
+                <div key={i} style={{background:"var(--s1)",borderRadius:9,padding:"9px 11px",marginBottom:5,fontSize:13,lineHeight:1.6}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"var(--t3)",marginBottom:2}}>
+                    <span>#{i+1}{s.lang==="en"?" · English":""}</span>
+                    {s.lang==="fr"&&<span style={{color:unk?"var(--acw)":"var(--ac2)"}}>{unk?`${unk} new`:"✓ all known"}</span>}
+                  </div>
+                  {renderSentence(s)}
+                </div>
+              );
+            })}
+            {A.sentences.length>400&&<p style={{fontSize:10,color:"var(--t3)"}}>Showing the first 400 sentences.</p>}
+            <p style={{fontSize:10,color:"var(--t3)",padding:"10px 0 28px"}}>Underlined = not known yet (tap for details) · grey italic = English · red = not in the dictionary</p>
+          </>)}
+        </div>
+      </div>
+    );
+  }
 
   // ---- BULK IMPORT ----
   if(scr==="bulk") return (
     <div style={sh}>
       <div style={{padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid var(--s2)"}}>
         <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <button onClick={()=>{setBulkMode(false);setBulkSelected(new Set());setScr("home");}} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
+          <button onClick={()=>{setBulkMode(false);setBulkSelected(new Set());setScr("labs");}} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
           <span style={{fontSize:13,fontWeight:600}}>Import from WordBit</span>
         </div>
         {bulkSelected.size>0&&<Btn onClick={bulkMarkKnown} pri s={{padding:"8px 14px",fontSize:12}}>Mark {bulkSelected.size} known ✓</Btn>}
@@ -908,7 +1225,7 @@ export default function App(){
     return (
       <div style={sh}>
         <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid var(--s2)"}}>
-          <button onClick={()=>setScr("home")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
+          <button onClick={()=>setScr(wordBack)} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
           <span style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px"}}>Word Detail</span>
         </div>
         <div style={{padding:16,maxWidth:440,margin:"0 auto"}}>
@@ -925,7 +1242,10 @@ export default function App(){
             <div style={{display:"flex",gap:4,marginTop:8,flexWrap:"wrap"}}>
               <Tag>{cur.lv}</Tag><Tag>{cur.g}</Tag>
               {cur.gn&&<Tag c={cur.gn==="m"?"rgba(79,138,232,0.12)":"rgba(232,79,155,0.12)"}>{cur.gn==="m"?"masc.":"fém."}</Tag>}
+              {cur.community&&<Tag c="rgba(75,133,224,0.12)">community</Tag>}
+              {isEditor&&<button onClick={()=>openContrib(cur)} style={{marginLeft:"auto",background:"var(--s2)",border:"none",borderRadius:7,padding:"3px 8px",fontSize:11,color:"var(--t2)",cursor:"pointer"}}>✏️ Edit</button>}
             </div>
+            {cur.note&&<p style={{margin:"8px 0 0",fontSize:12,color:"var(--t2)",background:"var(--s1)",borderRadius:8,padding:"8px 10px"}}>💡 {cur.note}</p>}
           </div>
           <div style={{background:"var(--s1)",borderRadius:9,padding:12,marginBottom:10}}>
             <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",marginBottom:6}}>Frequency</div>
@@ -953,9 +1273,9 @@ export default function App(){
             </div>
           )}
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <Btn onClick={()=>{mark(cur.id,"know");setScr("home");}} s={{background:"rgba(52,191,130,0.06)",color:"var(--ac2)",border:"1.5px solid rgba(52,191,130,0.15)"}}>Know it ✓</Btn>
-            <Btn onClick={()=>{mark(cur.id,"familiar");setScr("home");}} s={{background:"rgba(224,147,72,0.06)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>Familiar / close ≈</Btn>
-            <Btn onClick={()=>{mark(cur.id,"unknown");setScr("home");}} s={{background:"rgba(224,84,84,0.06)",color:"var(--dng)",border:"1.5px solid rgba(224,84,84,0.15)"}}>Don't know</Btn>
+            <Btn onClick={()=>{mark(cur.id,"know");setScr(wordBack);}} s={{background:"rgba(52,191,130,0.06)",color:"var(--ac2)",border:"1.5px solid rgba(52,191,130,0.15)"}}>Know it ✓</Btn>
+            <Btn onClick={()=>{mark(cur.id,"familiar");setScr(wordBack);}} s={{background:"rgba(224,147,72,0.06)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>Familiar / close ≈</Btn>
+            <Btn onClick={()=>{mark(cur.id,"unknown");setScr(wordBack);}} s={{background:"rgba(224,84,84,0.06)",color:"var(--dng)",border:"1.5px solid rgba(224,84,84,0.15)"}}>Don't know</Btn>
           </div>
         </div>
       </div>
@@ -1013,7 +1333,7 @@ export default function App(){
   if(scr==="roots") return (
     <div style={sh}>
       <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:8,borderBottom:"1px solid var(--s2)"}}>
-        <button onClick={()=>setScr("home")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
+        <button onClick={()=>setScr("labs")} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
         <span style={{fontSize:13,fontWeight:600}}>Roots & Patterns</span>
       </div>
       <div style={{padding:16,maxWidth:440,margin:"0 auto"}}>
@@ -1031,27 +1351,219 @@ export default function App(){
     </div>
   );
 
+  const backBar=(title,to="home")=>(
+    <div style={{padding:"12px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid var(--s2)"}}>
+      <button onClick={()=>setScr(to)} style={{background:"none",border:"none",color:"var(--t2)",fontSize:16,cursor:"pointer"}}>←</button>
+      <span style={{fontSize:14,fontWeight:600}}>{title}</span>
+      <span style={{width:20}}/>
+    </div>
+  );
+  const secLabel=(t)=><div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",margin:"18px 0 8px"}}>{t}</div>;
+
+  // ---- CONTRIBUTORS (add / fix dictionary words) ----
+  if(scr==="contrib"){
+    const ef=editForm;
+    const setF=(k,v)=>setEditForm(f=>({...f,[k]:v,msg:null}));
+    const field=(k,label,ph)=>(
+      <div style={{marginBottom:8}}>
+        <label style={{fontSize:10,color:"var(--t3)",display:"block",marginBottom:3}}>{label}</label>
+        <Input value={ef[k]||""} placeholder={ph} onChange={e=>setF(k,e.target.value)} />
+      </div>
+    );
+    const select=(k,label,opts)=>(
+      <div style={{flex:1}}>
+        <label style={{fontSize:10,color:"var(--t3)",display:"block",marginBottom:3}}>{label}</label>
+        <select value={ef[k]||""} onChange={e=>setF(k,e.target.value)} style={{width:"100%",padding:"10px",borderRadius:9,border:"1.5px solid var(--s2)",background:"var(--s1)",color:"var(--t1)",fontSize:13}}>
+          {opts.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+        </select>
+      </div>
+    );
+    const base = ef.w && !ef.cid ? formIndex.get(ef.w.trim().toLowerCase()) : null;
+    const baseIsExact = base && base.w.toLowerCase()===ef.w.trim().toLowerCase() && !base.community;
+    return (
+      <div style={sh}>
+        {backBar("🛠 Contributors","labs")}
+        <div style={{padding:"12px 16px 28px",maxWidth:440,margin:"0 auto"}}>
+          {(!user || user.anon) ? (
+            <p style={{fontSize:12,color:"var(--t2)"}}>Contributors need a real account (email or Google), not a guest account.</p>
+          ) : !isEditor ? (<>
+            <p style={{fontSize:12,color:"var(--t2)",margin:"0 0 10px"}}>Contributors can add missing words and correct translations, pronunciations and levels for everyone. Enter the contributor password to join.</p>
+            <Input type="password" placeholder="Contributor password" value={ef.code||""} onChange={e=>setF("code",e.target.value)} onKeyDown={e=>{if(e.key==="Enter")redeemCode();}} style={{marginBottom:8}}/>
+            <Btn onClick={redeemCode} pri s={{width:"100%"}}>Join as contributor</Btn>
+            {ef.msg&&<p style={{fontSize:12,color:ef.ok?"var(--ac2)":"var(--dng)",marginTop:8}}>{ef.msg}</p>}
+          </>) : (<>
+            <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",margin:"6px 0 8px"}}>{ef.cid?"Edit entry":"Add or correct a word"}</div>
+            {field("w","Word *","e.g. franchement")}
+            {baseIsExact&&<p style={{fontSize:11,color:"var(--acw)",margin:"-4px 0 8px"}}>Already in the dictionary. Saving creates a correction to it (blank fields keep the original).</p>}
+            {field("lm","Base form (infinitive / masculine singular)","leave blank if same as word")}
+            <div style={{display:"flex",gap:6,marginBottom:8}}>
+              {select("g","Type",[["","—"],["noun","noun"],["verb","verb"],["adj","adjective"],["adv","adverb"],["pron","pronoun"],["other","other / expression"]])}
+              {select("gn","Gender",[["","—"],["m","masc."],["f","fém."]])}
+              {select("lv","Level",[["","—"],...CEFR_LEVELS.map(l=>[l,l])])}
+            </div>
+            {field("tr","English meaning(s)","frankly / honestly, (informal) seriously")}
+            {field("p","Pronunciation (IPA)","fʁɑ̃ʃmɑ̃")}
+            {field("note","Usage / regional note","Very common in speech. Québec: …")}
+            <div style={{display:"flex",gap:6,marginTop:4}}>
+              <Btn onClick={()=>saveEntry(baseIsExact?base.id:null)} pri dis={!ef.w?.trim()||ef.saving} s={{flex:1}}>{ef.saving?"Saving…":"Save for everyone"}</Btn>
+              <Btn onClick={()=>setEditForm({})} s={{background:"var(--s2)"}}>Clear</Btn>
+            </div>
+            {ef.msg&&<p style={{fontSize:12,color:ef.ok?"var(--ac2)":"var(--dng)",marginTop:8}}>{ef.msg}</p>}
+
+            <div style={{fontSize:10,color:"var(--t3)",textTransform:"uppercase",letterSpacing:"1px",margin:"20px 0 8px"}}>Community entries ({community.length})</div>
+            {[...community].sort((a,b)=>(b.updated_at||"").localeCompare(a.updated_at||"")).slice(0,100).map(r=>(
+              <div key={r.id} style={{display:"flex",alignItems:"center",gap:6,background:"var(--s1)",borderRadius:9,padding:"8px 10px",marginBottom:4}}>
+                <div onClick={()=>setEditForm({cid:r.id,base_id:r.base_id,w:r.w,lm:r.lm||"",g:r.g||"",gn:r.gn||"",lv:r.lv||"",p:r.p||"",tr:r.tr||"",note:r.note||""})} style={{flex:1,cursor:"pointer",minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:600}}>{r.w} <span style={{fontSize:10,color:"var(--t3)",fontWeight:400}}>{r.base_id!=null?"correction":"new word"}</span></div>
+                  <div style={{fontSize:11,color:"var(--t2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.tr||""}</div>
+                </div>
+                <button title="Delete" onClick={()=>deleteEntry(r)} style={{background:"rgba(224,84,84,0.1)",border:"none",borderRadius:7,padding:"5px 8px",color:"var(--dng)",cursor:"pointer"}}>🗑</button>
+              </div>
+            ))}
+          </>)}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- SETTINGS ----
+  const goal=GOALS[goalKey(prof.goal)];
+  if(scr==="settings") return (
+    <div style={sh}>
+      {backBar("⚙ Settings")}
+      <div style={{padding:"4px 16px 28px",maxWidth:440,margin:"0 auto"}}>
+        {secLabel("Learning goal")}
+        {goalButtons}
+
+        {secLabel("French variety")}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {Object.entries(REGIONS).map(([c,n])=>(
+            <button key={c} onClick={()=>setProf(p=>({...p,region:c}))} style={{padding:"8px 14px",borderRadius:16,fontSize:12,border:"none",cursor:"pointer",background:prof.region===c?"var(--ac)":"var(--s2)",color:prof.region===c?"#fff":"var(--t2)"}}>{RF[c]} {n}</button>
+          ))}
+        </div>
+
+        {secLabel("Audio")}
+        <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--t2)",marginBottom:10}}>
+          <span>Speech speed</span>
+          <input type="range" min="0.6" max="1.2" step="0.05" value={audioRate} onChange={e=>setAudioRate(parseFloat(e.target.value))} style={{flex:1,accentColor:"var(--ac)"}}/>
+          <span>{audioRate.toFixed(2)}×</span>
+          <AudioBtn text="Bonjour, comment ça va ?" rate={audioRate} label="▶"/>
+        </div>
+        <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--t2)",cursor:"pointer"}}>
+          <input type="checkbox" checked={audioOn} onChange={e=>setAudioOn(e.target.checked)} style={{accentColor:"var(--ac)"}}/>
+          Auto-play words in Rapid Review
+        </label>
+
+        {secLabel("Account")}
+        <div style={{background:"var(--s1)",borderRadius:9,padding:"12px 14px",fontSize:12,color:"var(--t2)"}}>
+          <div style={{marginBottom:10}}>{user.anon ? "Guest account: progress is only saved on this device until you add an email or Google." : <>Signed in as <strong style={{color:"var(--t1)"}}>{user.email}</strong></>}</div>
+          <div style={{display:"flex",gap:6}}>
+            {user.anon&&<Btn onClick={()=>{setAuthForm(f=>({...f,error:null,info:null}));setScr("link");}} pri s={{flex:1}}>Save progress</Btn>}
+            <Btn onClick={logout} s={{flex:1,background:"var(--s2)",color:"var(--dng)"}}>Log out</Btn>
+          </div>
+        </div>
+
+        {!user.anon&&(<>
+          {secLabel("Change password")}
+          <div style={{background:"var(--s1)",borderRadius:9,padding:"12px 14px"}}>
+            <p style={{fontSize:11,color:"var(--t3)",margin:"0 0 8px"}}>Forgot your password? Log in with “Email me a link instead”, then set a new one here. Signed in with Google? This adds a password too.</p>
+            <Input type="password" placeholder="New password (6+ characters)" value={pwForm.pw1||""} onChange={e=>setPwForm(f=>({...f,pw1:e.target.value,msg:null}))} style={{marginBottom:6}}/>
+            <Input type="password" placeholder="Repeat new password" value={pwForm.pw2||""} onChange={e=>setPwForm(f=>({...f,pw2:e.target.value,msg:null}))}
+              onKeyDown={e=>{if(e.key==="Enter")changePassword();}} style={{marginBottom:8}}/>
+            <Btn onClick={changePassword} pri dis={pwForm.busy} s={{width:"100%"}}>{pwForm.busy?"Saving…":"Update password"}</Btn>
+            {pwForm.msg&&<p style={{fontSize:12,color:pwForm.ok?"var(--ac2)":"var(--dng)",margin:"8px 0 0"}}>{pwForm.msg}</p>}
+          </div>
+        </>)}
+      </div>
+    </div>
+  );
+
+  // ---- IN DEVELOPMENT (labs) ----
+  if(scr==="labs") return (
+    <div style={sh}>
+      {backBar("🧪 In development")}
+      <div style={{padding:"12px 16px 28px",maxWidth:440,margin:"0 auto"}}>
+        <p style={{fontSize:11,color:"var(--t3)",margin:"0 0 12px"}}>Features that work but are still being built. Expect rough edges.</p>
+        {[
+          {i:"📄",t:"Analyze a text",d:"Paste any French text: see which words you don't know yet, sentence by sentence",go:()=>setScr("text")},
+          {i:"🔗",t:"Family quiz",d:"Pick the word that belongs to the same word family",go:()=>startQuiz("family")},
+          {i:"🌳",t:"Roots & patterns",d:"Suffixes and prefixes that build new words",go:()=>setScr("roots")},
+          {i:"📋",t:"Mark a word list as known",d:"Paste any list of words (one per line or comma-separated), then tap “Mark all known”",go:()=>{setTxt("");setScr("text");}},
+          {i:"📥",t:"Import known words",d:"Search and bulk-select words you already know (e.g. from WordBit)",go:()=>setScr("bulk")},
+          {i:"🛠",t:"Contributors: add & fix words",d:"For the small contributor group: add missing words, fix translations, pronunciations and levels",go:()=>openContrib("")},
+        ].map(x=>(
+          <button key={x.t} onClick={x.go} style={{display:"flex",gap:12,alignItems:"center",width:"100%",textAlign:"left",background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:10,padding:"12px 14px",marginBottom:6,cursor:"pointer",color:"var(--t1)"}}>
+            <span style={{fontSize:22}}>{x.i}</span>
+            <span><strong style={{fontSize:13}}>{x.t}</strong><span style={{display:"block",fontSize:11,color:"var(--t3)",marginTop:2}}>{x.d}</span></span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  // ---- WORD LIST (browse / search / filter) ----
+  const chipStyle=(on)=>({padding:"6px 12px",borderRadius:14,fontSize:12,border:"none",cursor:"pointer",background:on?"var(--ac)":"var(--s2)",color:on?"#fff":"var(--t2)"});
+  if(scr==="words") return (
+    <div style={sh}>
+      {backBar("📚 Words")}
+      <div style={{padding:"12px 16px 28px",maxWidth:440,margin:"0 auto"}}>
+        <Input type="text" placeholder="Search..." value={srch} onChange={e=>setSrch(e.target.value)} style={{marginBottom:10}} />
+        <div style={{display:"flex",gap:5,marginBottom:6,flexWrap:"wrap"}}>
+          {CEFR_LEVELS.map(l=><button key={l} onClick={()=>setFLv(fLv===l?null:l)} style={chipStyle(fLv===l)}>{l}</button>)}
+        </div>
+        <div style={{display:"flex",gap:5,marginBottom:8,flexWrap:"wrap"}}>
+          {[...new Set(L.map(w=>w.g))].filter(g=>G_LABEL[g]).sort().map(g=><button key={g} onClick={()=>setFGr(fGr===g?null:g)} style={chipStyle(fGr===g)}>{G_LABEL[g]}</button>)}
+        </div>
+
+        <div style={{fontSize:10,color:"var(--t3)",marginBottom:6}}>
+          {vocab.length} words · spoken frequency ↓
+          {vocab.length > LIST_LIMIT && ` · showing top ${LIST_LIMIT}, search or filter for more`}
+        </div>
+        {/* Word list */}
+        {displayVocab.map(w=>{
+          const s=st(w.id),ch=chain(w);
+          return (
+            <button key={w.id} onClick={()=>{setCur(w);setWordBack("words");setScr("word");}} style={{display:"block",width:"100%",textAlign:"left",background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:9,padding:"10px 12px",marginBottom:5,cursor:"pointer",color:"var(--t1)",borderLeftWidth:3,borderLeftColor:statusColor(s)}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{display:"flex",alignItems:"center",gap:5}}>
+                  <span style={{fontSize:14,fontWeight:600}}>{w.w}</span>
+                  <span style={{fontSize:10,color:"var(--t3)"}}>/{w.p}/</span>
+                  {ch>0&&<span style={{fontSize:8,color:"var(--acw)",background:"rgba(224,147,72,0.08)",padding:"1px 4px",borderRadius:5}}>🔗{ch}%</span>}
+                </div>
+                <div style={{display:"flex",gap:3}}><Tag>{w.lv}</Tag><Tag>{w.g}</Tag>{w.gn&&<Tag c={w.gn==="m"?"rgba(79,138,232,0.12)":"rgba(232,79,155,0.12)"}>{w.gn}</Tag>}</div>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
+		<span style={{fontSize:11,color:"var(--t2)"}}>{tr(w) || (w.lm!==w.w?`→ ${w.lm}`:"")}{w.fm.length>0?` · ${w.fm.length} forms`:""}</span>
+                <span style={{fontSize:9,color:"var(--t3)"}}>{Math.round(w.fs)}/M</span>
+              </div>
+            </button>
+          );
+        })}
+
+      </div>
+    </div>
+  );
+
   // ---- HOME ----
-  const ex=prof.goal?EXAMS[prof.goal]:null;
   return (
     <div style={sh}>
       <div style={{padding:"10px 16px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid var(--s2)"}}>
         <div>
-          <h1 style={{fontSize:17,fontWeight:700,margin:0}}>🇫🇷 French</h1>
-          <span style={{fontSize:9,color:"var(--t3)"}}>
-            {user.email ? user.email.split("@")[0] : "Guest"} · {ex?.name||"Personal"}
+          <button onClick={()=>{setScr("home");window.scrollTo({top:0,behavior:"smooth"});}} title="Home" style={{background:"none",border:"none",padding:0,cursor:"pointer",color:"var(--t1)"}}>
+            <h1 style={{fontSize:17,fontWeight:700,margin:0}}>🇫🇷 Objectif Français</h1>
+          </button>
+          <span style={{display:"block",fontSize:9,color:"var(--t3)"}}>
+            {user.email ? user.email.split("@")[0] : "Guest"} · {goal?.short||"Personal"}
             {sync!=="idle"&&<span style={{color:sync==="offline"?"var(--dng)":"var(--t3)"}}> · {sync==="saving"?"☁ saving…":sync==="saved"?"☁ saved":"☁ offline"}</span>}
-            {ex?.nclc&&<span style={{color:"var(--ac)",fontWeight:600}}> · NCLC {Math.max(...Object.values(ex.nclc))}+</span>}
           </span>
         </div>
         <div style={{display:"flex",gap:4}}>
+          {user.anon&&<button onClick={()=>{setAuthForm(f=>({...f,error:null,info:null}));setScr("link");}} style={{background:"rgba(52,191,130,0.12)",border:"1px solid var(--ac2)",borderRadius:7,padding:"5px 9px",color:"var(--ac2)",fontSize:11,cursor:"pointer"}}>Save progress</button>}
           <button onClick={()=>setAudioOn(v=>!v)} title={audioOn?"Auto-play on":"Auto-play off"}
-            style={{background:audioOn?"rgba(75,133,224,0.15)":"var(--s1)",border:`1px solid ${audioOn?"var(--ac)":"var(--s2)"}`,borderRadius:7,padding:"4px 8px",color:audioOn?"var(--ac)":"var(--t3)",fontSize:10,cursor:"pointer"}}>
+            style={{background:audioOn?"rgba(75,133,224,0.15)":"var(--s1)",border:`1px solid ${audioOn?"var(--ac)":"var(--s2)"}`,borderRadius:7,padding:"5px 9px",color:audioOn?"var(--ac)":"var(--t3)",fontSize:11,cursor:"pointer"}}>
             {audioOn?"🔊":"🔇"}
           </button>
-          {user.anon&&<button onClick={()=>{setAuthForm(f=>({...f,error:null,info:null}));setScr("link");}} style={{background:"rgba(52,191,130,0.12)",border:"1px solid var(--ac2)",borderRadius:7,padding:"4px 8px",color:"var(--ac2)",fontSize:10,cursor:"pointer"}}>Save progress</button>}
-          <button onClick={()=>setScr("onb")} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:7,padding:"4px 8px",color:"var(--t2)",fontSize:10,cursor:"pointer"}}>⚙</button>
-          <button onClick={logout} style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:7,padding:"4px 8px",color:"var(--t3)",fontSize:10,cursor:"pointer"}}>↪ out</button>
+          <button onClick={()=>setScr("settings")} title="Settings" style={{background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:7,padding:"5px 9px",color:"var(--t2)",fontSize:11,cursor:"pointer"}}>⚙</button>
         </div>
       </div>
 
@@ -1071,59 +1583,17 @@ export default function App(){
           <div style={{width:`${(stats.l/stats.t)*100}%`,background:"var(--ac)"}}/>
         </div>
 
-        {/* Audio speed */}
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:11,color:"var(--t3)"}}>
-          <span>Speech speed</span>
-          <input type="range" min="0.6" max="1.2" step="0.05" value={audioRate}
-            onChange={e=>setAudioRate(parseFloat(e.target.value))}
-            style={{flex:1,accentColor:"var(--ac)"}} />
-          <span>{audioRate.toFixed(2)}×</span>
-        </div>
-
         {/* Actions */}
-        <div style={{display:"flex",gap:4,marginBottom:10,flexWrap:"wrap"}}>
-          <Btn onClick={()=>startQuiz("relation")} pri s={{flex:1,padding:"10px 0"}}>▶ Relations</Btn>
-          <Btn onClick={()=>startQuiz("meaning")} s={{flex:1,padding:"10px 0",background:"var(--s2)",color:"var(--ac2)"}}>🇬🇧 Meaning</Btn>
-          <Btn onClick={()=>startQuiz("audio")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--ac)"}}>👂</Btn>
-          <Btn onClick={()=>setScr("rapid-setup")} s={{flex:1,padding:"10px 0",background:"rgba(224,147,72,0.1)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>⚡ Rapid</Btn>
-          <Btn onClick={()=>startQuiz("family")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--acw)"}}>🔗</Btn>
-          <Btn onClick={()=>setScr("roots")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--acw)"}}>🌳</Btn>
-          <Btn onClick={()=>setScr("bulk")} s={{padding:"10px 12px",background:"var(--s2)",color:"var(--ac2)"}}>📥</Btn>
+        <Btn onClick={()=>startQuiz("relation")} pri s={{width:"100%",padding:"14px 0",fontSize:15,marginBottom:6}}>▶ Start studying</Btn>
+        <div style={{display:"flex",gap:6,marginBottom:6}}>
+          <Btn onClick={()=>setScr("rapid-setup")} s={{flex:1,background:"rgba(224,147,72,0.1)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>⚡ Rapid review</Btn>
+          <Btn onClick={()=>startQuiz("meaning")} s={{flex:1,background:"var(--s2)",color:"var(--ac2)"}}>🇬🇧 Meaning</Btn>
+          <Btn onClick={()=>startQuiz("audio")} s={{flex:1,background:"var(--s2)",color:"var(--ac)"}}>👂 Listen</Btn>
         </div>
-
-        {/* Search + filters */}
-        <Input type="text" placeholder="Search..." value={srch} onChange={e=>setSrch(e.target.value)} style={{marginBottom:8}} />
-        <div style={{display:"flex",gap:3,marginBottom:5,flexWrap:"wrap"}}>
-          {CEFR_LEVELS.map(l=><button key={l} onClick={()=>setFLv(fLv===l?null:l)} style={{padding:"3px 8px",borderRadius:12,fontSize:10,border:"none",cursor:"pointer",background:fLv===l?"var(--ac)":"var(--s2)",color:fLv===l?"#fff":"var(--t2)"}}>{l}</button>)}
-          <span style={{width:1,background:"var(--s2)",margin:"0 1px"}}/>
-          {[...new Set(L.map(w=>w.g))].sort().map(g=><button key={g} onClick={()=>setFGr(fGr===g?null:g)} style={{padding:"3px 8px",borderRadius:12,fontSize:10,border:"none",cursor:"pointer",background:fGr===g?"var(--ac)":"var(--s2)",color:fGr===g?"#fff":"var(--t2)"}}>{g}</button>)}
+        <div style={{display:"flex",gap:6,marginBottom:6}}>
+          <Btn onClick={()=>setScr("words")} s={{flex:1,background:"var(--s2)"}}>📚 Browse words</Btn>
+          <Btn onClick={()=>setScr("labs")} s={{flex:1,background:"var(--s2)",color:"var(--t2)"}}>🧪 In development</Btn>
         </div>
-
-        <div style={{fontSize:10,color:"var(--t3)",marginBottom:6}}>
-          {vocab.length} words · spoken frequency ↓
-          {vocab.length > LIST_LIMIT && ` · showing top ${LIST_LIMIT} — search or filter for more`}
-        </div>
-
-        {/* Word list */}
-        {displayVocab.map(w=>{
-          const s=st(w.id),ch=chain(w);
-          return (
-            <button key={w.id} onClick={()=>{setCur(w);setScr("word");}} style={{display:"block",width:"100%",textAlign:"left",background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:9,padding:"10px 12px",marginBottom:5,cursor:"pointer",color:"var(--t1)",borderLeftWidth:3,borderLeftColor:statusColor(s)}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{display:"flex",alignItems:"center",gap:5}}>
-                  <span style={{fontSize:14,fontWeight:600}}>{w.w}</span>
-                  <span style={{fontSize:10,color:"var(--t3)"}}>/{w.p}/</span>
-                  {ch>0&&<span style={{fontSize:8,color:"var(--acw)",background:"rgba(224,147,72,0.08)",padding:"1px 4px",borderRadius:5}}>🔗{ch}%</span>}
-                </div>
-                <div style={{display:"flex",gap:3}}><Tag>{w.lv}</Tag><Tag>{w.g}</Tag>{w.gn&&<Tag c={w.gn==="m"?"rgba(79,138,232,0.12)":"rgba(232,79,155,0.12)"}>{w.gn}</Tag>}</div>
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
-		<span style={{fontSize:11,color:"var(--t2)"}}>{tr(w) || (w.lm!==w.w?`→ ${w.lm}`:"")}{w.fm.length>0?` · ${w.fm.length} forms`:""}</span>
-                <span style={{fontSize:9,color:"var(--t3)"}}>{Math.round(w.fs)}/M</span>
-              </div>
-            </button>
-          );
-        })}
 
         {/* CTA */}
         <div style={{marginTop:16,padding:16,borderRadius:9,background:"linear-gradient(135deg,rgba(75,133,224,0.05),rgba(52,191,130,0.05))",border:"1px solid rgba(75,133,224,0.08)",textAlign:"center"}}>
