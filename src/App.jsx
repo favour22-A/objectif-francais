@@ -158,6 +158,55 @@ const speakFrench = (text, rate = 0.92) => {
   window.speechSynthesis.speak(u);
 };
 
+// ============ REAL RECORDINGS (Lingua Libre, via Wikimedia Commons) ============
+// Native-speaker recordings, CC BY-SA. Files are named "LL-Q150 (fra)-<speaker>-<word>.wav".
+// Looked up on demand, cached per browser; falls back to the TTS voice when none exists.
+const LL_KEY = "objectif-francais:ll-cache";
+const llCache = (() => { try { return JSON.parse(localStorage.getItem(LL_KEY) || "{}"); } catch { return {}; } })();
+const llSave = () => { try { localStorage.setItem(LL_KEY, JSON.stringify(llCache)); } catch { /* storage full or blocked */ } };
+const llPending = {};
+async function findRecording(word) {
+  const w = (word || "").trim().toLowerCase();
+  if (!w || /\s/.test(w)) return null;          // single words only
+  if (w in llCache) return llCache[w];
+  if (llPending[w]) return llPending[w];
+  llPending[w] = (async () => {
+    try {
+      const q = `intitle:"LL-Q150 (fra)" intitle:"${w.replace(/"/g, "")}"`;
+      const r = await fetch(`https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&list=search&srnamespace=6&srlimit=50&srsearch=${encodeURIComponent(q)}`);
+      const d = await r.json();
+      const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`^File:LL-Q150 \\(fra\\)-(.+)-${esc}\\.(wav|ogg|flac|mp3)$`, "i");
+      const hit = (d?.query?.search || []).map(x => x.title.match(re)).find(Boolean);
+      const rec = hit ? { file: hit[0].slice(5), speaker: hit[1] } : null;
+      llCache[w] = rec; llSave();                 // remember "no recording" too
+      return rec;
+    } catch { return null; }                      // network error: don't cache, retry next time
+    finally { delete llPending[w]; }
+  })();
+  return llPending[w];
+}
+const recUrl = (f) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(f)}`;
+const recPage = (f) => `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(f)}`;
+let curAudio = null;
+// Play a word: real recording if one exists, otherwise the browser voice
+async function speakWord(text, rate = 0.92) {
+  if (!text) return;
+  window.speechSynthesis?.cancel();
+  if (curAudio) { curAudio.pause(); curAudio = null; }
+  const rec = await findRecording(text);
+  if (rec) {
+    try {
+      const a = new Audio(recUrl(rec.file));
+      a.playbackRate = Math.max(0.5, Math.min(2, rate / 0.92)); // 0.92 on the slider = natural speed
+      curAudio = a;
+      await a.play();
+      return;
+    } catch { /* fall through to TTS */ }
+  }
+  speakFrench(text, rate);
+}
+
 // ============ COMPONENTS ============
 const V={"--bg":"#0A0D12","--s1":"#12161E","--s2":"#1A2030","--s3":"#242D3E","--ac":"#4B85E0","--ac2":"#34BF82","--acw":"#E09348","--t1":"#E2E6EE","--t2":"#8892A6","--t3":"#4A5366","--dng":"#E05454","--card":"#14181F"};
 const sh={...V,background:"var(--bg)",color:"var(--t1)",minHeight:"100vh",fontFamily:"'Inter','SF Pro Text',system-ui,sans-serif"};
@@ -165,7 +214,7 @@ const Tag=({children,c})=><span style={{padding:"2px 7px",borderRadius:10,backgr
 const Btn=({children,onClick,pri,dis,s:st})=><button onClick={onClick} disabled={dis} style={{padding:"11px 18px",borderRadius:9,border:"none",fontSize:13,fontWeight:600,cursor:dis?"default":"pointer",background:pri?"var(--ac)":"var(--s1)",color:pri?"#fff":"var(--t1)",opacity:dis?.4:1,transition:"all .15s",...st}}>{children}</button>;
 const Input=({...props})=><input {...props} style={{width:"100%",padding:"11px 14px",borderRadius:9,border:"1.5px solid var(--s2)",background:"var(--s1)",color:"var(--t1)",fontSize:14,outline:"none",boxSizing:"border-box",...props.style}} />;
 const AudioBtn=({text,rate,label="🔊",s:st})=>(
-  <button type="button" onClick={()=>speakFrench(text,rate)} title="Play pronunciation" aria-label="Play pronunciation"
+  <button type="button" onClick={()=>speakWord(text,rate)} title="Play pronunciation" aria-label="Play pronunciation"
     style={{background:"var(--s2)",border:"1px solid var(--s3)",borderRadius:8,padding:"6px 10px",fontSize:14,cursor:"pointer",color:"var(--t1)",lineHeight:1,...st}}>
     {label}
   </button>
@@ -341,6 +390,7 @@ export default function App(){
   const [rapidStats, setRapidStats] = useState({known:0,familiar:0,learning:0,total:0});
   const [shuffledPool, setShuffledPool] = useState([]);
   const [liveTr, setLiveTr] = useState({});
+  const [rec, setRec] = useState(null); // Lingua Libre recording for the open word
   const [bulkSrch, setBulkSrch] = useState("");
   const [txtDraft, setTxtDraft] = useState("");
   const [txt, setTxt] = useState("");
@@ -520,8 +570,16 @@ export default function App(){
     if (scr !== "rapid" || !audioOn) return;
     const pool2 = shuffledPool.length > 0 ? shuffledPool : L;
     const w = pool2[rapidIdx];
-    if (w) speakFrench(w.w, audioRate);
+    if (w) speakWord(w.w, audioRate);
   }, [scr, rapidIdx, rapidLevel, audioOn, audioRate, L]);
+  // Look up a real recording for the open word (for the attribution line)
+  useEffect(() => {
+    if (scr !== "word" || !cur) return;
+    let live = true;
+    setRec(null);
+    findRecording(cur.w).then(r => { if (live) setRec(r); });
+    return () => { live = false; };
+  }, [scr, cur]);
   // Fetch translation when viewing a word that has none locally
   useEffect(() => {
     if (scr !== "word" || !cur) return;
@@ -680,7 +738,7 @@ export default function App(){
         .sort(()=>Math.random()-.5).slice(0,3).map(w=>w.w);
       if(distractors.length<2) return;
       setQuiz({tgt,opts:[...distractors,tgt.w].sort(()=>Math.random()-.5),ans:tgt.w,mode:"audio",a:null,ok:null});
-      setTimeout(()=>speakFrench(tgt.w,audioRate),400);
+      setTimeout(()=>speakWord(tgt.w,audioRate),400);
     }
     else if(mode==="meaning"){
       const trPool = pool.filter(w=>tr(w));
@@ -1236,6 +1294,7 @@ export default function App(){
               <span style={{fontSize:12,color:"var(--t3)"}}>/{cur.p}/</span>
               <AudioBtn text={cur.w} rate={audioRate} s={{padding:"5px 8px",fontSize:13}} />
             </div>
+            {rec&&<p style={{margin:"2px 0 0",fontSize:10,color:"var(--t3)"}}>🎙 Real recording by <a href={recPage(rec.file)} target="_blank" rel="noreferrer" style={{color:"var(--t2)"}}>{rec.speaker}</a> · Lingua Libre (CC BY-SA)</p>}
             {(()=>{const m=tr(cur)||liveTr[cur.lm];return m
               ?<p style={{margin:"4px 0 0",fontSize:16,color:"var(--ac2)",fontWeight:500}}>{m}</p>
               :<p style={{margin:"4px 0 0",fontSize:13,color:"var(--t3)",fontStyle:"italic"}}>translating…</p>;})()}
