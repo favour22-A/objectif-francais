@@ -1,4 +1,4 @@
-// Builds public/recordings-fr.json: { word: "speaker" | "speaker|ext" } for every
+// Builds public/recordings-fr.json: { word: "speaker|OriginalWord.ext" } for every
 // dictionary word that has a Lingua Libre recording, and prints coverage stats.
 // Run from the project folder:  node scripts/build-recordings.mjs
 // Needs Node 18+ and internet access to commons.wikimedia.org. Takes a few minutes.
@@ -7,7 +7,8 @@ import fs from "node:fs";
 const API = "https://commons.wikimedia.org/w/api.php";
 const CAT = "Category:Lingua Libre pronunciation-fra";
 const UA = "ObjectifFrancais/0.4 (https://objectif-francais.vercel.app; cibitoru@gmail.com)";
-const RE = /^File:LL-Q150 \(fra\)-(.+)-(.+)\.(wav|ogg|flac|mp3)$/i;
+// Split on the FIRST hyphen after the prefix: speaker, then the word or phrase exactly as named
+const RE = /^File:LL-Q150 \(fra\)-(.+?)-(.+)\.(wav|ogg|flac|mp3)$/i;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // 1. Every French Lingua Libre file → word: first speaker found
@@ -23,8 +24,10 @@ do {
     const x = m.title.match(RE);
     if (!x) continue;
     files++;
-    const word = x[2].toLowerCase();
-    if (!found.has(word)) found.set(word, x[3].toLowerCase() === "wav" ? x[1] : `${x[1]}|${x[3].toLowerCase()}`);
+    const word = x[2], key = word.toLowerCase(), exact = word === key;
+    // Keep the exact file name; prefer the plain lowercase recording over capitalised ones (names, phrase starts)
+    if (!found.has(key) || (exact && !found.get(key).exact))
+      found.set(key, { v: `${x[1]}|${word}.${x[3]}`, exact });
   }
   cont = d.continue?.cmcontinue;
   if (++pages % 20 === 0) console.log(`…${files} recordings, ${found.size} distinct words`);
@@ -39,7 +42,7 @@ let hit = 0;
 for (const e of dict) {
   for (const k of [e.w, e.l]) {
     const key = (k || "").toLowerCase();
-    if (key && found.has(key)) out[key] = found.get(key);
+    if (key && found.has(key)) out[key] = found.get(key).v;
   }
   if (found.has((e.w || "").toLowerCase())) hit++;
 }

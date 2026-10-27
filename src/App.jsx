@@ -176,8 +176,10 @@ async function findRecording(word) {
   if (map) {
     const v = map[w];
     if (!v) return null;
-    const [speaker, ext = "wav"] = v.split("|");
-    return { file: `LL-Q150 (fra)-${speaker}-${w}.${ext}`, speaker };
+    const [speaker, rest] = v.split("|");
+    // New format stores the exact original name ("Word.ext"); old format stored only an extension
+    const file = rest && rest.includes(".") ? `LL-Q150 (fra)-${speaker}-${rest}` : `LL-Q150 (fra)-${speaker}-${w}.${rest || "wav"}`;
+    return { file, speaker };
   }
   if (w in llCache) return llCache[w];
   if (llPending[w]) return llPending[w];
@@ -187,8 +189,9 @@ async function findRecording(word) {
       const r = await fetch(`https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&list=search&srnamespace=6&srlimit=50&srsearch=${encodeURIComponent(q)}`);
       const d = await r.json();
       const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const re = new RegExp(`^File:LL-Q150 \\(fra\\)-(.+)-${esc}\\.(wav|ogg|flac|mp3)$`, "i");
-      const hit = (d?.query?.search || []).map(x => x.title.match(re)).find(Boolean);
+      const re = new RegExp(`^File:LL-Q150 \\(fra\\)-([^-]+?)-(${esc})\\.(wav|ogg|flac|mp3)$`, "i");
+      const hits = (d?.query?.search || []).map(x => x.title.match(re)).filter(Boolean);
+      const hit = hits.find(m => m[2] === w) || hits[0]; // prefer the plain lowercase recording
       const rec = hit ? { file: hit[0].slice(5), speaker: hit[1] } : null;
       llCache[w] = rec; llSave();                 // remember "no recording" too
       return rec;
