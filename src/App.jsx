@@ -165,9 +165,20 @@ const LL_KEY = "objectif-francais:ll-cache";
 const llCache = (() => { try { return JSON.parse(localStorage.getItem(LL_KEY) || "{}"); } catch { return {}; } })();
 const llSave = () => { try { localStorage.setItem(LL_KEY, JSON.stringify(llCache)); } catch { /* storage full or blocked */ } };
 const llPending = {};
+// Prebuilt word → speaker map (public/recordings-fr.json, made by scripts/build-recordings.mjs).
+// Loaded once; if it's missing, lookups fall back to a live Commons search per word.
+let llMap; // undefined = not loaded yet, null = unavailable
+const llMapReady = fetch("/recordings-fr.json").then(r => r.ok ? r.json() : null).catch(() => null).then(m => { llMap = m; return m; });
 async function findRecording(word) {
   const w = (word || "").trim().toLowerCase();
   if (!w || /\s/.test(w)) return null;          // single words only
+  const map = llMap === undefined ? await llMapReady : llMap;
+  if (map) {
+    const v = map[w];
+    if (!v) return null;
+    const [speaker, ext = "wav"] = v.split("|");
+    return { file: `LL-Q150 (fra)-${speaker}-${w}.${ext}`, speaker };
+  }
   if (w in llCache) return llCache[w];
   if (llPending[w]) return llPending[w];
   llPending[w] = (async () => {
@@ -189,20 +200,24 @@ async function findRecording(word) {
 const recUrl = (f) => `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(f)}`;
 const recPage = (f) => `https://commons.wikimedia.org/wiki/File:${encodeURIComponent(f)}`;
 let curAudio = null;
-// Play a word: real recording if one exists, otherwise the browser voice
+let playToken = 0; // only the newest play request may make sound
+// Play a word: real recording if one exists, otherwise the browser voice. Never both.
 async function speakWord(text, rate = 0.92) {
   if (!text) return;
+  const my = ++playToken;
   window.speechSynthesis?.cancel();
   if (curAudio) { curAudio.pause(); curAudio = null; }
   const rec = await findRecording(text);
+  if (my !== playToken) return;                   // a newer request took over
   if (rec) {
-    try {
-      const a = new Audio(recUrl(rec.file));
-      a.playbackRate = Math.max(0.5, Math.min(2, rate / 0.92)); // 0.92 on the slider = natural speed
-      curAudio = a;
-      await a.play();
-      return;
-    } catch { /* fall through to TTS */ }
+    const a = new Audio(recUrl(rec.file));
+    a.playbackRate = Math.max(0.5, Math.min(2, rate / 0.92)); // 0.92 on the slider = natural speed
+    a.onplaying = () => window.speechSynthesis?.cancel();     // real voice wins
+    curAudio = a;
+    const ok = await a.play().then(() => true, () => false);
+    if (my !== playToken) { a.pause(); return; }
+    if (ok) return;
+    curAudio = null;                              // blocked or failed: use the voice instead
   }
   speakFrench(text, rate);
 }
@@ -571,6 +586,7 @@ export default function App(){
     const pool2 = shuffledPool.length > 0 ? shuffledPool : L;
     const w = pool2[rapidIdx];
     if (w) speakWord(w.w, audioRate);
+    for (let k = 1; k <= 3; k++) if (pool2[rapidIdx + k]) findRecording(pool2[rapidIdx + k].w); // warm up next words
   }, [scr, rapidIdx, rapidLevel, audioOn, audioRate, L]);
   // Look up a real recording for the open word (for the attribution line)
   useEffect(() => {
@@ -738,7 +754,7 @@ export default function App(){
         .sort(()=>Math.random()-.5).slice(0,3).map(w=>w.w);
       if(distractors.length<2) return;
       setQuiz({tgt,opts:[...distractors,tgt.w].sort(()=>Math.random()-.5),ans:tgt.w,mode:"audio",a:null,ok:null});
-      setTimeout(()=>speakWord(tgt.w,audioRate),400);
+      findRecording(tgt.w); setTimeout(()=>speakWord(tgt.w,audioRate),400);
     }
     else if(mode==="meaning"){
       const trPool = pool.filter(w=>tr(w));
