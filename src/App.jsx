@@ -407,6 +407,7 @@ export default function App(){
   const [quiz, setQuiz] = useState(null);
   const [fLv, setFLv] = useState(null);
   const [fGr, setFGr] = useState(null);
+  const [fSt, setFSt] = useState(null); // status filter: known|familiar|learning|new
   const [srch, setSrch] = useState("");
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkSelected, setBulkSelected] = useState(new Set());
@@ -702,6 +703,17 @@ export default function App(){
     });
   },[]);
 
+  // Manual placement (word page / word list): puts the word straight into a list.
+  // Quizzes and Rapid Review still use mark(), which needs 3 correct answers for Known.
+  const setStatus = useCallback((id, s)=>{
+    setLrn(p=>{
+      const e=p[id]||{ps:0,fl:0,fam:0,iv:1};
+      if(s==="known")    return{...p,[id]:{...e,ps:Math.max(e.ps,3),fam:0,iv:Math.max(e.iv,16),t:Date.now()}};
+      if(s==="familiar") return{...p,[id]:{...e,ps:Math.min(Math.max(e.ps,1),2),fam:1,iv:Math.max(Math.min(e.iv,8),2),t:Date.now()}};
+      return{...p,[id]:{...e,ps:Math.min(Math.max(e.ps,1),2),fam:0,iv:1,t:Date.now()}};
+    });
+  },[]);
+
   const st = useCallback(id=>{
     const e=lrn[id];
     if(!e)return"new";
@@ -721,8 +733,9 @@ export default function App(){
   const vocab = useMemo(()=>L.filter(w=>{
     if(fLv&&w.lv!==fLv)return false;if(fGr&&w.g!==fGr)return false;
     if(srch&&!w.w.includes(srch.toLowerCase())&&!w.lm.includes(srch.toLowerCase()))return false;
+    if(fSt&&st(w.id)!==fSt)return false;
     return true;
-  }),[L, fLv, fGr, srch]);
+  }),[L, fLv, fGr, srch, fSt, st]);
 
   const displayVocab = useMemo(() => vocab.slice(0, LIST_LIMIT), [vocab]);
 
@@ -1361,8 +1374,8 @@ export default function App(){
             </div>
           )}
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <Btn onClick={()=>{mark(cur.id,"know");setScr(wordBack);}} s={{background:"rgba(52,191,130,0.06)",color:"var(--ac2)",border:"1.5px solid rgba(52,191,130,0.15)"}}>Know it ✓</Btn>
-            <Btn onClick={()=>{mark(cur.id,"familiar");setScr(wordBack);}} s={{background:"rgba(224,147,72,0.06)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>Familiar / close ≈</Btn>
+            <Btn onClick={()=>{setStatus(cur.id,"known");setScr(wordBack);}} s={{background:"rgba(52,191,130,0.06)",color:"var(--ac2)",border:"1.5px solid rgba(52,191,130,0.15)"}}>Know it ✓</Btn>
+            <Btn onClick={()=>{setStatus(cur.id,"familiar");setScr(wordBack);}} s={{background:"rgba(224,147,72,0.06)",color:"var(--acw)",border:"1.5px solid rgba(224,147,72,0.15)"}}>Familiar / close ≈</Btn>
             <Btn onClick={()=>{mark(cur.id,"unknown");setScr(wordBack);}} s={{background:"rgba(224,84,84,0.06)",color:"var(--dng)",border:"1.5px solid rgba(224,84,84,0.15)"}}>Don't know</Btn>
           </div>
         </div>
@@ -1603,6 +1616,10 @@ export default function App(){
           {[...new Set(L.map(w=>w.g))].filter(g=>G_LABEL[g]).sort().map(g=><button key={g} onClick={()=>setFGr(fGr===g?null:g)} style={chipStyle(fGr===g)}>{G_LABEL[g]}</button>)}
         </div>
 
+        <div style={{display:"flex",gap:5,marginBottom:8,flexWrap:"wrap"}}>
+          {[["known","✓ Known",stats.k],["familiar","≈ Familiar",stats.f],["learning","◐ Learning",stats.l],["new","○ New",stats.n]].map(([k,lab,c])=>
+            <button key={k} onClick={()=>setFSt(fSt===k?null:k)} style={chipStyle(fSt===k)}>{lab} {c}</button>)}
+        </div>
         <div style={{fontSize:10,color:"var(--t3)",marginBottom:6}}>
           {vocab.length} words · spoken frequency ↓
           {vocab.length > LIST_LIMIT && ` · showing top ${LIST_LIMIT}, search or filter for more`}
@@ -1611,7 +1628,7 @@ export default function App(){
         {displayVocab.map(w=>{
           const s=st(w.id),ch=chain(w);
           return (
-            <button key={w.id} onClick={()=>{setCur(w);setWordBack("words");setScr("word");}} style={{display:"block",width:"100%",textAlign:"left",background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:9,padding:"10px 12px",marginBottom:5,cursor:"pointer",color:"var(--t1)",borderLeftWidth:3,borderLeftColor:statusColor(s)}}>
+            <div key={w.id} onClick={()=>{setCur(w);setWordBack("words");setScr("word");}} style={{width:"100%",boxSizing:"border-box",textAlign:"left",background:"var(--s1)",border:"1px solid var(--s2)",borderRadius:9,padding:"10px 12px",marginBottom:5,cursor:"pointer",color:"var(--t1)",borderLeftWidth:3,borderLeftColor:statusColor(s)}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div style={{display:"flex",alignItems:"center",gap:5}}>
                   <span style={{fontSize:14,fontWeight:600}}>{w.w}</span>
@@ -1624,7 +1641,12 @@ export default function App(){
 		<span style={{fontSize:11,color:"var(--t2)"}}>{tr(w) || (w.lm!==w.w?`→ ${w.lm}`:"")}{w.fm.length>0?` · ${w.fm.length} forms`:""}</span>
                 <span style={{fontSize:9,color:"var(--t3)"}}>{Math.round(w.fs)}/M</span>
               </div>
-            </button>
+                          <div style={{display:"flex",gap:5,marginTop:7}}>
+                <button title="known" onClick={e=>{e.stopPropagation();setStatus(w.id,"known");}} style={{flex:1,padding:"6px 0",borderRadius:7,fontSize:12,fontWeight:600,cursor:"pointer",border:s==="known"?"1.5px solid var(--ac2)":"1px solid var(--s2)",background:s==="known"?"var(--s2)":"transparent",color:"var(--ac2)"}}>✓ Known</button>
+                <button title="familiar" onClick={e=>{e.stopPropagation();setStatus(w.id,"familiar");}} style={{flex:1,padding:"6px 0",borderRadius:7,fontSize:12,fontWeight:600,cursor:"pointer",border:s==="familiar"?"1.5px solid var(--acw)":"1px solid var(--s2)",background:s==="familiar"?"var(--s2)":"transparent",color:"var(--acw)"}}>≈ Familiar</button>
+                <button title="learning" onClick={e=>{e.stopPropagation();setStatus(w.id,"learning");}} style={{flex:1,padding:"6px 0",borderRadius:7,fontSize:12,fontWeight:600,cursor:"pointer",border:s==="learning"?"1.5px solid var(--ac)":"1px solid var(--s2)",background:s==="learning"?"var(--s2)":"transparent",color:"var(--ac)"}}>◐ Learning</button>
+              </div>
+            </div>
           );
         })}
 
@@ -1658,8 +1680,8 @@ export default function App(){
       <div style={{padding:"12px 16px",maxWidth:440,margin:"0 auto"}}>
         {/* Stats */}
         <div style={{display:"flex",gap:4,marginBottom:10,flexWrap:"wrap"}}>
-          {[{l:"Known",c:stats.k,cl:"var(--ac2)"},{l:"Familiar",c:stats.f,cl:"var(--acw)"},{l:"Learning",c:stats.l,cl:"var(--ac)"},{l:"New",c:stats.n,cl:"var(--t3)"}].map(s=>(
-            <div key={s.l} style={{flex:"1 1 22%",minWidth:70,background:"var(--s1)",borderRadius:9,padding:"8px 0",textAlign:"center"}}>
+          {[{l:"Known",k:"known",c:stats.k,cl:"var(--ac2)"},{l:"Familiar",k:"familiar",c:stats.f,cl:"var(--acw)"},{l:"Learning",k:"learning",c:stats.l,cl:"var(--ac)"},{l:"New",k:"new",c:stats.n,cl:"var(--t3)"}].map(s=>(
+            <div key={s.l} role="button" title={`Show ${s.l} words`} onClick={()=>{setFSt(s.k);setSrch("");setFLv(null);setFGr(null);setScr("words");}} style={{flex:"1 1 22%",minWidth:70,background:"var(--s1)",borderRadius:9,padding:"8px 0",textAlign:"center",cursor:"pointer"}}>
               <div style={{fontSize:18,fontWeight:700,color:s.cl}}>{s.c}</div>
               <div style={{fontSize:9,color:"var(--t3)"}}>{s.l}</div>
             </div>
